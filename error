@@ -1,0 +1,329 @@
+error[E0432]: unresolved import `ammonia`
+ --> main.rs:1:5
+  |
+1 | use ammonia::clean;
+  |     ^^^^^^^ use of unresolved module or unlinked crate `ammonia`
+  |
+  = help: if you wanted to use a crate named `ammonia`, use `cargo add ammonia` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `arcstr`
+ --> main.rs:2:5
+  |
+2 | use arcstr::ArcStr;
+  |     ^^^^^^ use of unresolved module or unlinked crate `arcstr`
+  |
+  = help: if you wanted to use a crate named `arcstr`, use `cargo add arcstr` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `bytes`
+ --> main.rs:3:5
+  |
+3 | use bytes::Bytes;
+  |     ^^^^^ use of unresolved module or unlinked crate `bytes`
+  |
+  = help: if you wanted to use a crate named `bytes`, use `cargo add bytes` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `bumpalo`
+ --> main.rs:4:5
+  |
+4 | use bumpalo::Bump;
+  |     ^^^^^^^ use of unresolved module or unlinked crate `bumpalo`
+  |
+  = help: if you wanted to use a crate named `bumpalo`, use `cargo add bumpalo` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `ratatui`
+ --> main.rs:6:5
+  |
+6 | use ratatui::{
+  |     ^^^^^^^ use of unresolved module or unlinked crate `ratatui`
+  |
+  = help: if you wanted to use a crate named `ratatui`, use `cargo add ratatui` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `lru`
+ --> main.rs:5:5
+  |
+5 | use lru::LruCache;
+  |     ^^^ use of unresolved module or unlinked crate `lru`
+  |
+  = help: if you wanted to use a crate named `lru`, use `cargo add lru` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `ratatui`
+ --> main.rs:6:5
+  |
+6 | use ratatui::{
+  |     ^^^^^^^ use of unresolved module or unlinked crate `ratatui`
+  |
+  = help: if you wanted to use a crate named `ratatui`, use `cargo add ratatui` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `sled`
+  --> main.rs:15:5
+   |
+15 | use sled::Db;
+   |     ^^^^ use of unresolved module or unlinked crate `sled`
+   |
+   = help: if you wanted to use a crate named `sled`, use `cargo add sled` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `quick_xml`
+  --> main.rs:20:5
+   |
+20 | use quick_xml::{events::Event, Reader};
+   |     ^^^^^^^^^ use of unresolved module or unlinked crate `quick_xml`
+   |
+   = help: if you wanted to use a crate named `quick_xml`, use `cargo add quick_xml` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `sysinfo`
+  --> main.rs:17:5
+   |
+17 | use sysinfo::{System, SystemExt};
+   |     ^^^^^^^ use of unresolved module or unlinked crate `sysinfo`
+   |
+   = help: if you wanted to use a crate named `sysinfo`, use `cargo add sysinfo` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `quick_xml`
+  --> main.rs:20:5
+   |
+20 | use quick_xml::{events::Event, Reader};
+   |     ^^^^^^^^^ use of unresolved module or unlinked crate `quick_xml`
+   |
+   = help: if you wanted to use a crate named `quick_xml`, use `cargo add quick_xml` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tokio_retry`
+  --> main.rs:22:5
+   |
+22 | use tokio_retry::{Retry, strategy::ExponentialBackoff};
+   |     ^^^^^^^^^^^ use of unresolved module or unlinked crate `tokio_retry`
+   |
+   = help: if you wanted to use a crate named `tokio_retry`, use `cargo add tokio_retry` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tokio_retry`
+  --> main.rs:22:5
+   |
+22 | use tokio_retry::{Retry, strategy::ExponentialBackoff};
+   |     ^^^^^^^^^^^ use of unresolved module or unlinked crate `tokio_retry`
+   |
+   = help: if you wanted to use a crate named `tokio_retry`, use `cargo add tokio_retry` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `priority_queue`
+  --> main.rs:23:5
+   |
+23 | use priority_queue::PriorityQueue;
+   |     ^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `priority_queue`
+   |
+   = help: if you wanted to use a crate named `priority_queue`, use `cargo add priority_queue` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `tracing`
+  --> main.rs:24:5
+   |
+24 | use tracing::{error, info};
+   |     ^^^^^^^ use of unresolved module or unlinked crate `tracing`
+   |
+   = help: if you wanted to use a crate named `tracing`, use `cargo add tracing` to add it to your `Cargo.toml`
+
+error[E0432]: unresolved import `url`
+  --> main.rs:25:5
+   |
+25 | use url::Url;
+   |     ^^^ use of unresolved module or unlinked crate `url`
+   |
+   = help: if you wanted to use a crate named `url`, use `cargo add url` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `lazy_static`
+  --> main.rs:27:1
+   |
+27 | lazy_static::lazy_static! {
+   | ^^^^^^^^^^^ use of unresolved module or unlinked crate `lazy_static`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `zstd`
+  --> main.rs:80:18
+   |
+80 | let compressed = zstd::stream::encode_all(sanitized.as_...
+   |                  ^^^^ use of unresolved module or unlinked crate `zstd`
+   |
+help: there is a crate or module with a similar name
+   |
+80 - let compressed = zstd::stream::encode_all(sanitized.as_bytes(), 3).map_err(|e| reqwest::Error::from(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+80 + let compressed = std::stream::encode_all(sanitized.as_bytes(), 3).map_err(|e| reqwest::Error::from(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+   |
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tracing`
+   --> main.rs:225:17
+    |
+225 | .with_max_level(tracing::Level::INFO)
+    |                 ^^^^^^^ use of unresolved module or unlinked crate `tracing`
+    |
+    = help: if you wanted to use a crate named `tracing`, use `cargo add tracing` to add it to your `Cargo.toml`
+
+error[E0425]: cannot find value `HSTS_LIST` in this scope
+  --> main.rs:54:4
+   |
+54 | if HSTS_LIST.contains(&Url::parse(&url).unwrap().host_s...
+   |    ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `CACHE` in this scope
+  --> main.rs:58:13
+   |
+58 | let cache = CACHE.lock().unwrap();
+   |             ^^^^^ not found in this scope
+
+error[E0425]: cannot find value `DB` in this scope
+  --> main.rs:63:21
+   |
+63 | if let Ok(cached) = DB.get(&url) {
+   |                     ^^ not found in this scope
+
+error[E0425]: cannot find value `SEMAPHORE` in this scope
+  --> main.rs:68:15
+   |
+68 | let _permit = SEMAPHORE.acquire().await.unwrap();
+   |               ^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `CLIENT` in this scope
+  --> main.rs:71:7
+   |
+71 | match CLIENT.get(&url).send().await {
+   |       ^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `CACHE` in this scope
+  --> main.rs:83:1
+   |
+83 | CACHE.lock().unwrap().put(url.clone(), bytes.clone());
+   | ^^^^^ not found in this scope
+
+error[E0425]: cannot find value `DB` in this scope
+  --> main.rs:84:1
+   |
+84 | DB.insert(url, compressed).unwrap();
+   | ^^ not found in this scope
+
+warning: unused imports: `Certificate` and `Client`
+  --> main.rs:14:15
+   |
+14 | use reqwest::{Client, Certificate};
+   |               ^^^^^^  ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `Arc` and `Mutex`
+  --> main.rs:16:17
+   |
+16 | use std::sync::{Arc, Mutex};
+   |                 ^^^  ^^^^^
+
+warning: unused import: `Semaphore`
+  --> main.rs:19:19
+   |
+19 | use tokio::sync::{Semaphore, mpsc};
+   |                   ^^^^^^^^^
+
+warning: unused import: `Write`
+  --> main.rs:21:23
+   |
+21 | use std::io::{stdout, Write};
+   |                       ^^^^^
+
+error[E0308]: mismatched types
+  --> main.rs:80:101
+   |
+80 | ...e| reqwest::Error::from(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+   |       -------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `reqwest::Error`, found `std::io::Error`
+   |       |
+   |       arguments to this function are incorrect
+   |
+   = note: `std::io::Error` and `reqwest::Error` have similar names, but are actually distinct types
+note: `std::io::Error` is defined in crate `std`
+  --> /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/std/src/io/error.rs:65:1
+note: `reqwest::Error` is defined in crate `reqwest`
+  --> /Users/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.11.27/src/error.rs:16:1
+   |
+16 | pub struct Error {
+   | ^^^^^^^^^^^^^^^^
+note: associated function defined here
+  --> /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/core/src/convert/mod.rs:588:8
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+   --> main.rs:184:13
+    |
+184 |         let html = fetch_page(&tab.url).await?;  
+    |             ^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `[u8]`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+   --> main.rs:184:20
+    |
+184 |         let html = fetch_page(&tab.url).await?;  
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `[u8]`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+   --> main.rs:184:46
+    |
+184 |         let html = fetch_page(&tab.url).await?;  
+    |                                              ^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `[u8]`
+note: required by a bound in `Break`
+   --> /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/core/src/ops/control_flow.rs:95:5
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+   --> main.rs:184:20
+    |
+184 |         let html = fetch_page(&tab.url).await?;  
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `[u8]`
+note: required by a bound in `Continue`
+   --> /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/core/src/ops/control_flow.rs:91:5
+
+error[E0308]: mismatched types
+  --> main.rs:45:63
+   |
+45 | ...e| reqwest::Error::from(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
+   |       -------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `reqwest::Error`, found `std::io::Error`
+   |       |
+   |       arguments to this function are incorrect
+   |
+   = note: `std::io::Error` and `reqwest::Error` have similar names, but are actually distinct types
+note: `std::io::Error` is defined in crate `std`
+  --> /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/std/src/io/error.rs:65:1
+note: `reqwest::Error` is defined in crate `reqwest`
+  --> /Users/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.11.27/src/error.rs:16:1
+   |
+16 | pub struct Error {
+   | ^^^^^^^^^^^^^^^^
+note: associated function defined here
+  --> /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/core/src/convert/mod.rs:588:8
+
+error[E0308]: mismatched types
+  --> main.rs:47:33
+   |
+47 | ...rr(reqwest::Error::from(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Only HTTPS URLs allowed")));
+   |       -------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `reqwest::Error`, found `std::io::Error`
+   |       |
+   |       arguments to this function are incorrect
+   |
+   = note: `std::io::Error` and `reqwest::Error` have similar names, but are actually distinct types
+note: `std::io::Error` is defined in crate `std`
+  --> /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/std/src/io/error.rs:65:1
+note: `reqwest::Error` is defined in crate `reqwest`
+  --> /Users/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.11.27/src/error.rs:16:1
+   |
+16 | pub struct Error {
+   | ^^^^^^^^^^^^^^^^
+note: associated function defined here
+  --> /rustc/29483883eed69d5fb4db01964cdf2af4d86e9cb2/library/core/src/convert/mod.rs:588:8
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `tracing_subscriber`
+   --> main.rs:224:1
+    |
+224 | tracing_subscriber::fmt()
+    | ^^^^^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `tracing_subscriber`
+    |
+    = help: if you wanted to use a crate named `tracing_subscriber`, use `cargo add tracing_subscriber` to add it to your `Cargo.toml`
+
+Some errors have detailed explanations: E0277, E0308, E0425, E0432, E0433.
+For more information about an error, try `rustc --explain E0277`.
+warning: `MyLumra` (bin "MyLumra") generated 4 warnings
+error: could not compile `MyLumra` (bin "MyLumra") due to 34 previous errors; 4 warnings emitted
