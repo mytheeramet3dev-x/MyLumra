@@ -1,0 +1,31 @@
+[package]
+name = "MyLumra"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+ammonia = "3"
+arcstr = "1.2"
+bytes = "1.0"
+bumpalo = "3"
+lru = "0.7"
+ratatui = { version = "0.20", features = ["termion"] } # หรือ crossterm ถ้าต้องการ
+reqwest = { version = "0.11", features = ["json","rustls-tls"] }
+sled = "0.34"
+sysinfo = "0.28"
+termion = "1.5"
+tokio = { version = "1", features = ["full"] }
+quick-xml = "0.29"
+tokio-retry = "0.3"
+priority-queue = "2.5" # หรือเวอร์ชันที่คุณเลือก
+tracing = "0.1"
+tracing-subscriber = "0.3"
+url = "2.3"
+lazy_static = "1.4"
+zstd = "0.11"
+
+
+[[bin]]
+name = "MyLumra"
+path = "main.rs"
