@@ -1,5 +1,3 @@
-// src/main.rs
-
 use anyhow::{anyhow, Result};
 use ammonia::clean;
 use arcstr::ArcStr;
@@ -14,29 +12,29 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
-use reqwest::{Client, Certificate};
+use reqwest::Client;
 use sled::Db;
-use std::sync::{Mutex};
-use sysinfo::{CpuExt, System, SystemExt};
+use std::sync::Mutex;
+use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System, SystemExt, ProcessExt}; // <--- Import ProcessExt
 use termion::{event::Key, input::TermRead, raw::IntoRawMode};
 use tokio::sync::{Semaphore, mpsc};
-use quick_xml::{events::Event, Reader};
 use std::io::stdout;
 use tokio_retry::{Retry, strategy::ExponentialBackoff};
 use priority_queue::PriorityQueue;
 use tracing::{error, info};
 use url::Url;
+use scraper::{Html, Selector};
+use std::time::Duration;
 use zstd;
 
 lazy_static::lazy_static! {
-    static ref CLIENT: Client = {
-        Client::builder()
+    static ref CLIENT: Client = Client::builder()
         .user_agent("MyTextBrowser/1.0")
         .https_only(true)
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
         .build()
-        .unwrap()
-    };
-
+        .unwrap();
     static ref CACHE: Mutex<LruCache<String, Bytes>> = Mutex::new(LruCache::new(100));
     static ref SEMAPHORE: Semaphore = Semaphore::new(10);
     static ref DB: Db = sled::open("browser_cache").unwrap();
@@ -56,105 +54,84 @@ async fn fetch_page(url: &str) -> Result<Bytes> {
     if HSTS_LIST.contains(&Url::parse(&url).unwrap().host_str().unwrap_or("")) {
         info!("HSTS enforced for {}", url);
     }
-
-    // ตรวจสอบ cache memory ก่อน
     {
         let mut cache = CACHE.lock().unwrap();
         if let Some(cached) = cache.get(&url) {
             return Ok(cached.clone());
         }
-    } // ปล่อย lock ตรงนี้ ก่อน await
-
-    // ตรวจสอบ cache disk (sled)
+    }
     if let Ok(cached) = DB.get(&url) {
         if let Some(data) = cached {
-            return Ok(Bytes::from(data.to_vec()));
+            let decompressed = zstd::stream::decode_all(data.as_ref())
+                .map_err(|e| anyhow!(e))?;
+            let bytes = Bytes::from(decompressed);
+            CACHE.lock().unwrap().put(url.clone(), bytes.clone());
+            return Ok(bytes);
         }
     }
-
-    // ขอ semaphore ครั้งเดียวก่อนทำ network
     let _permit = SEMAPHORE.acquire().await.unwrap();
-
     let retry_strategy = ExponentialBackoff::from_millis(100)
         .max_delay(std::time::Duration::from_secs(2))
         .take(3);
-
     let html = Retry::spawn(retry_strategy, || async {
         match CLIENT.get(&url).send().await {
-            Ok(res) => res.text().await.map_err(|e| anyhow!(e)),
+            Ok(res) => {
+                if let Some(len) = res.content_length() {
+                    if len > 2 * 1024 * 1024 {
+                        return Err(anyhow!("Response too large"));
+                    }
+                }
+                res.text().await.map_err(|e| anyhow!(e))
+            }
             Err(e) => {
                 error!("Failed to fetch {}: {}", url, e);
                 Err(anyhow!(e))
             }
         }
-    })
-    .await?;
-
-    // sanitize and compress
+    }).await?;
     let sanitized = clean(&html);
     let compressed = zstd::stream::encode_all(sanitized.as_bytes(), 3).map_err(|e| anyhow!(e))?;
-    let bytes = Bytes::from(compressed.clone());
-
-    // เก็บ cache memory และ disk
+    let bytes = Bytes::from(sanitized.as_bytes().to_vec());
     {
         CACHE.lock().unwrap().put(url.clone(), bytes.clone());
         let _ = DB.insert(url, compressed);
     }
-
     Ok(bytes)
 }
 
-fn render_text(html: &[u8], arena: &Bump) -> (String, Vec<ArcStr>) {
+fn render_text(html: &[u8], base_url: &Url, arena: &Bump) -> (String, Vec<ArcStr>) {
     let html_str = String::from_utf8_lossy(html);
-    let mut reader = Reader::from_str(&html_str);
-    reader.trim_text(true);
-    let mut text = String::new();
-    let mut links = Vec::new();
-    let mut link_index = 0;
-    let mut in_script_or_style = false;
+    let document = Html::parse_document(&html_str);
 
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref e)) => {
-                let tag = e.name().as_ref().to_vec();
-                if tag.as_slice() == b"script" || tag.as_slice() == b"style" {
-                    in_script_or_style = true;
-                } else if tag.as_slice() == b"a" {
-                    if let Some(attr_res) = e
-                        .attributes()
-                        .find(|a| a.as_ref().map_or(false, |attr| attr.key.as_ref() == b"href"))
-                    {
-                        if let Ok(attr) = attr_res {
-                            if let Ok(url_str) = std::str::from_utf8(&attr.value) {
-                                if let Ok(valid_url) = validate_url(url_str) {
-                                    links.push(ArcStr::from(valid_url));
-                                }
-                            }
-                        }
-                    }
+    let body_selector = Selector::parse("body").unwrap();
+    let link_selector = Selector::parse("a[href]").unwrap();
+
+    let mut text = String::new();
+    if let Some(body) = document.select(&body_selector).next() {
+        for chunk in body.text() {
+            let trimmed = chunk.trim();
+            if !trimmed.is_empty() {
+                text.push_str(trimmed);
+                text.push('\n');
+            }
+        }
+    }
+
+    let mut links = Vec::new();
+    for a in document.select(&link_selector) {
+        if let Some(href) = a.value().attr("href") {
+            if let Ok(resolved) = base_url.join(href) {
+                if resolved.scheme() == "https" {
+                    links.push(ArcStr::from(resolved.to_string()));
                 }
             }
-            Ok(Event::End(ref e)) => {
-                let tag = e.name().as_ref().to_vec();
-                if tag.as_slice() == b"script" || tag.as_slice() == b"style" {
-                    in_script_or_style = false;
-                }
-            }
-            Ok(Event::Text(e)) if !in_script_or_style => {
-                if let Ok(content) = e.unescape() {
-                    let trimmed = content.trim();
-                    if !trimmed.is_empty() {
-                        text.push_str(&format!("[{}] {}\n", link_index, trimmed));
-                        link_index += 1;
-                    }
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => {
-                error!("Parsing error: {}", e);
-                break;
-            }
-            _ => {}
+        }
+    }
+
+    if !links.is_empty() {
+        text.push_str("\nLinks:\n");
+        for (i, link) in links.iter().enumerate() {
+            text.push_str(&format!("[{}] {}\n", i, link));
         }
     }
 
@@ -184,14 +161,20 @@ struct Browser {
     tabs: Vec<Tab>,
     active_tab: usize,
     system: System,
+    pid: Pid,
 }
 
 impl Browser {
     fn new() -> Self {
+        let proc_refresh = ProcessRefreshKind::everything();
+        let refresh_kind = RefreshKind::new().with_processes(proc_refresh);
+        let system = System::new_with_specifics(refresh_kind);
+        let pid = sysinfo::get_current_pid().expect("Failed to get PID");
         Browser {
             tabs: Vec::new(),
             active_tab: 0,
-            system: System::new_all(),
+            system,
+            pid,
         }
     }
 
@@ -209,11 +192,12 @@ impl Browser {
         let tab = &mut self.tabs[self.active_tab];
         if tab.text.is_none() {
             let html = fetch_page(tab.url.as_str()).await?;
-            let (text, links) = render_text(&html, arena);
+            let base = Url::parse(tab.url.as_str())?;
+            let (text, links) = render_text(&html, &base, arena);
             tab.text = Some(text);
             tab.links = Some(links.clone());
+
             let (tx, mut rx) = mpsc::channel(1);
-            
             tokio::spawn({
                 let links_clone = links.clone();
                 async move {
@@ -241,24 +225,25 @@ impl Browser {
     }
 
     fn get_system_info(&mut self) -> String {
-        self.system.refresh_all();
-        format!(
-            "RAM: {} MB used / {} MB total\nCPU: {:.1}%",
-            self.system.used_memory() / 1024 / 1024,
-            self.system.total_memory() / 1024 / 1024,
-            self.system.global_cpu_info().cpu_usage()
-        )
+        self.system.refresh_process(self.pid);
+        if let Some(process) = self.system.process(self.pid) {
+            format!(
+                "Browser RAM: {} KB\nBrowser CPU: {:.1}%",
+                process.memory(),
+                process.cpu_usage()
+            )
+        } else {
+            "Error: Process info unavailable".to_string()
+        }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    // Optional: sandbox (Linux)
     #[cfg(target_os = "linux")]
     {
         use seccomp::{SeccompAction, SeccompFilter, SyscallRuleSet};
@@ -279,7 +264,7 @@ async fn main() -> Result<()> {
     }
 
     let mut browser = Browser::new();
-    let urls = vec!["https://example.com"; 10]; // ลดจำนวนตอน dev
+    let urls = vec!["https://example.com"; 10];
     for url in urls {
         browser.open_tab(url).await;
     }
@@ -333,7 +318,7 @@ async fn main() -> Result<()> {
             f.render_widget(content, chunks[1]);
 
             let sys_info = Paragraph::new(browser.get_system_info())
-                .block(Block::default().borders(Borders::ALL).title("System"));
+                .block(Block::default().borders(Borders::ALL).title("Browser Stats"));
             f.render_widget(sys_info, chunks[2]);
         })?;
 
@@ -368,3 +353,4 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
