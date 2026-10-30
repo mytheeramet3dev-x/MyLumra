@@ -12,6 +12,12 @@ pub struct RenderedLink {
     pub target: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct RenderedTextSpan {
+    pub rect: egui::Rect,
+    pub text: String,
+}
+
 pub struct PageRender {
     pub image: ColorImage,
     #[allow(dead_code)]
@@ -19,6 +25,7 @@ pub struct PageRender {
     #[allow(dead_code)]
     pub height_pt: f32,
     pub links: Vec<RenderedLink>,
+    pub text_spans: Vec<RenderedTextSpan>,
 }
 
 pub fn compile_and_render(
@@ -70,25 +77,33 @@ pub fn compile_and_render(
         let height_pt = page.frame.size().y.to_pt() as f32;
 
         let mut links = Vec::new();
-        extract_links(&page.frame, Point::zero(), &mut links, scale);
+        let mut text_spans = Vec::new();
+        extract_items(&page.frame, Point::zero(), &mut links, &mut text_spans, scale);
 
         pages.push(PageRender {
             image: color_image,
             width_pt,
             height_pt,
             links,
+            text_spans,
         });
     }
 
     Ok(pages)
 }
 
-fn extract_links(frame: &Frame, offset: Point, links: &mut Vec<RenderedLink>, scale: f32) {
+fn extract_items(
+    frame: &Frame,
+    offset: Point,
+    links: &mut Vec<RenderedLink>,
+    text_spans: &mut Vec<RenderedTextSpan>,
+    scale: f32,
+) {
     for (pos, item) in frame.items() {
         let current_pos = Point::new(offset.x + pos.x, offset.y + pos.y);
         match item {
             FrameItem::Group(group) => {
-                extract_links(&group.frame, current_pos, links, scale);
+                extract_items(&group.frame, current_pos, links, text_spans, scale);
             }
             FrameItem::Link(dest, size) => {
                 let target = match dest {
@@ -103,6 +118,17 @@ fn extract_links(frame: &Frame, offset: Point, links: &mut Vec<RenderedLink>, sc
                 links.push(RenderedLink {
                     rect: egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)),
                     target,
+                });
+            }
+            FrameItem::Text(text_item) => {
+                let font_size = text_item.size.to_pt() as f32 * scale;
+                let x = current_pos.x.to_pt() as f32 * scale;
+                let y = (current_pos.y.to_pt() as f32 - text_item.size.to_pt() as f32 * 0.85) * scale;
+                let w = text_item.width().to_pt() as f32 * scale;
+                let h = font_size;
+                text_spans.push(RenderedTextSpan {
+                    rect: egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w.max(2.0), h.max(2.0))),
+                    text: text_item.text.to_string(),
                 });
             }
             _ => {}
@@ -141,5 +167,6 @@ mod tests {
         assert_eq!(pages.len(), 1);
         assert!(!pages[0].links.is_empty(), "Link should be detected");
         assert_eq!(pages[0].links[0].target, "lumra://home");
+        assert!(!pages[0].text_spans.is_empty(), "Text spans should be extracted");
     }
 }

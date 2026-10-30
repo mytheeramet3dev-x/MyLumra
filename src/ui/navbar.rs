@@ -1,5 +1,10 @@
 use egui::{Key, Response, RichText, Ui};
 
+pub struct Bookmark {
+    pub title: String,
+    pub url: String,
+}
+
 pub struct NavbarAction {
     pub navigate_to: Option<String>,
     pub go_back: bool,
@@ -13,6 +18,9 @@ pub struct NavbarAction {
     pub close_tab: Option<usize>,
     pub switch_tab: Option<usize>,
     pub toggle_web_mode: bool,
+    pub toggle_view_source: bool,
+    pub toggle_find: bool,
+    pub toggle_bookmark: bool,
 }
 
 impl Default for NavbarAction {
@@ -30,6 +38,9 @@ impl Default for NavbarAction {
             close_tab: None,
             switch_tab: None,
             toggle_web_mode: false,
+            toggle_view_source: false,
+            toggle_find: false,
+            toggle_bookmark: false,
         }
     }
 }
@@ -92,9 +103,22 @@ pub fn render_navbar(
     can_forward: bool,
     zoom: f32,
     web_mode: bool,
+    view_source: bool,
+    is_bookmarked: bool,
     is_loading: bool,
     action: &mut NavbarAction,
 ) -> Response {
+    // Keyboard shortcuts
+    if ui.input(|i| i.modifiers.command && i.key_pressed(Key::F)) {
+        action.toggle_find = true;
+    }
+    if ui.input(|i| i.modifiers.command && i.key_pressed(Key::U)) {
+        action.toggle_view_source = true;
+    }
+    if ui.input(|i| i.modifiers.command && i.key_pressed(Key::D)) {
+        action.toggle_bookmark = true;
+    }
+
     ui.horizontal(|ui| {
         // Navigation Buttons
         if ui.add_enabled(can_back, egui::Button::new("◀")).on_hover_text("ย้อนกลับ").clicked() {
@@ -115,13 +139,20 @@ pub fn render_navbar(
 
         // Address Bar
         let response = ui.add_sized(
-            [ui.available_width() - 250.0, 24.0],
+            [ui.available_width() - 330.0, 24.0],
             egui::TextEdit::singleline(url_input)
                 .hint_text("พิมพ์ URL (เช่น lumra://home หรือ https://...) แล้วกด Enter"),
         );
 
         if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
             action.navigate_to = Some(url_input.clone());
+        }
+
+        // Bookmark button inside address area
+        let bm_icon = if is_bookmarked { "⭐" } else { "☆" };
+        let bm_tooltip = if is_bookmarked { "ลบบุ๊กมาร์ก (Cmd+D)" } else { "บันทึกบุ๊กมาร์ก (Cmd+D)" };
+        if ui.button(bm_icon).on_hover_text(bm_tooltip).clicked() {
+            action.toggle_bookmark = true;
         }
 
         ui.separator();
@@ -135,6 +166,22 @@ pub fn render_navbar(
         };
         if ui.button(mode_label).on_hover_text(mode_tooltip).clicked() {
             action.toggle_web_mode = true;
+        }
+
+        // View Source Button
+        let src_label = if view_source { "👁️ View" } else { "</> Code" };
+        let src_tooltip = if view_source {
+            "สลับกลับไปหน้าเว็บปกติ (Cmd+U)"
+        } else {
+            "ดูซอร์สโค้ด Typst ของหน้านี้ (Cmd+U)"
+        };
+        if ui.selectable_label(view_source, src_label).on_hover_text(src_tooltip).clicked() {
+            action.toggle_view_source = true;
+        }
+
+        // Find in Page Button
+        if ui.button("🔍").on_hover_text("ค้นหาข้อความในหน้า (Cmd+F)").clicked() {
+            action.toggle_find = true;
         }
 
         ui.separator();
@@ -153,4 +200,19 @@ pub fn render_navbar(
 
         response
     }).inner
+}
+
+pub fn render_bookmarks_bar(
+    ui: &mut Ui,
+    bookmarks: &[Bookmark],
+    action: &mut NavbarAction,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("🔖").size(12.0));
+        for bm in bookmarks {
+            if ui.small_button(&bm.title).on_hover_text(&bm.url).clicked() {
+                action.navigate_to = Some(bm.url.clone());
+            }
+        }
+    });
 }

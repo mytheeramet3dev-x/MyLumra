@@ -3,11 +3,15 @@ use std::sync::Arc;
 use eframe::egui::{self, Color32, RichText};
 use crate::engine::{compile_and_render, FontStore, PageRender};
 use crate::net::ContentFetcher;
-use crate::ui::{render_navbar, render_tabs, render_viewport, NavbarAction};
+use crate::ui::{
+    render_bookmarks_bar, render_navbar, render_tabs, render_viewport, Bookmark, FindState,
+    NavbarAction, SelectionState,
+};
 
 pub struct NavigationResult {
     pub tab_id: usize,
     pub url: String,
+    pub raw_source: String,
     pub result: anyhow::Result<Vec<PageRender>>,
 }
 
@@ -24,6 +28,10 @@ pub struct TabState {
     pub error_message: Option<String>,
     pub zoom: f32,
     pub web_mode: bool,
+    pub view_source: bool,
+    pub raw_source: String,
+    pub find_state: FindState,
+    pub selection_state: SelectionState,
 }
 
 impl TabState {
@@ -41,6 +49,10 @@ impl TabState {
             error_message: None,
             zoom: 1.0,
             web_mode: true,
+            view_source: false,
+            raw_source: String::new(),
+            find_state: FindState::default(),
+            selection_state: SelectionState::default(),
         }
     }
 }
@@ -55,6 +67,7 @@ pub struct LumraApp {
     hovered_url: Option<String>,
     next_tab_id: usize,
     last_viewport_size: [f32; 2],
+    bookmarks: Vec<Bookmark>,
 }
 
 impl LumraApp {
@@ -101,6 +114,25 @@ impl LumraApp {
         let initial_url = "lumra://home";
         let initial_tab = TabState::new(0, initial_url);
 
+        let default_bookmarks = vec![
+            Bookmark {
+                title: "🏠 Home".to_string(),
+                url: "lumra://home".to_string(),
+            },
+            Bookmark {
+                title: "📖 Cheatsheet".to_string(),
+                url: "lumra://cheatsheet".to_string(),
+            },
+            Bookmark {
+                title: "ℹ️ About".to_string(),
+                url: "lumra://about".to_string(),
+            },
+            Bookmark {
+                title: "🌟 Showcase".to_string(),
+                url: "sample.typ".to_string(),
+            },
+        ];
+
         let app = Self {
             tabs: vec![initial_tab],
             active_tab: 0,
@@ -111,6 +143,7 @@ impl LumraApp {
             hovered_url: None,
             next_tab_id: 1,
             last_viewport_size: [900.0, 700.0],
+            bookmarks: default_bookmarks,
         };
 
         app.trigger_navigation(0, initial_url.to_string());
@@ -133,6 +166,8 @@ impl LumraApp {
                 Err(e) => Err(anyhow::anyhow!("Runtime error: {}", e)),
             };
 
+            let raw_source = content_res.as_ref().ok().cloned().unwrap_or_default();
+
             let compile_res = match &content_res {
                 Ok(source) => compile_and_render(
                     font_store,
@@ -149,6 +184,7 @@ impl LumraApp {
             let _ = tx.send(NavigationResult {
                 tab_id,
                 url,
+                raw_source,
                 result: compile_res,
             });
         });
@@ -159,6 +195,7 @@ impl LumraApp {
             tab.is_loading = true;
             tab.error_message = None;
             tab.url_input = url.clone();
+            tab.view_source = false;
 
             // Append to history if it's a new location
             if tab.history.get(tab.history_index) != Some(&url) {
@@ -179,6 +216,7 @@ impl LumraApp {
                 let prev_url = tab.history[tab.history_index].clone();
                 tab.is_loading = true;
                 tab.url_input = prev_url.clone();
+                tab.view_source = false;
                 let tab_id = tab.id;
                 self.trigger_navigation(tab_id, prev_url);
             }
@@ -192,6 +230,7 @@ impl LumraApp {
                 let next_url = tab.history[tab.history_index].clone();
                 tab.is_loading = true;
                 tab.url_input = next_url.clone();
+                tab.view_source = false;
                 let tab_id = tab.id;
                 self.trigger_navigation(tab_id, next_url);
             }
@@ -237,6 +276,7 @@ impl eframe::App for LumraApp {
         while let Ok(nav) = self.rx.try_recv() {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == nav.tab_id) {
                 tab.is_loading = false;
+                tab.raw_source = nav.raw_source;
                 match nav.result {
                     Ok(pages) => {
                         tab.textures.clear();
@@ -262,7 +302,7 @@ impl eframe::App for LumraApp {
             }
         }
 
-        // 2. Render Top Panel (Tabs + Navbar)
+        // 2. Render Top Panel (Tabs + Navbar + Bookmarks Bar)
         let mut action = NavbarAction::default();
 
         egui::TopBottomPanel::top("top_panel")
@@ -278,6 +318,8 @@ impl eframe::App for LumraApp {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     let can_back = tab.history_index > 0;
                     let can_forward = tab.history_index + 1 < tab.history.len();
+                    let is_bm = self.bookmarks.iter().any(|b| b.url == tab.current_url);
+
                     render_navbar(
                         ui,
                         &mut tab.url_input,
@@ -285,9 +327,15 @@ impl eframe::App for LumraApp {
                         can_forward,
                         tab.zoom,
                         tab.web_mode,
+                        tab.view_source,
+                        is_bm,
                         tab.is_loading,
                         &mut action,
                     );
+
+                    ui.add_space(3.0);
+                    // Bookmarks Bar
+                    render_bookmarks_bar(ui, &self.bookmarks, &mut action);
                 }
             });
 
@@ -302,7 +350,13 @@ impl eframe::App for LumraApp {
                         } else if let Some(ref hovered) = self.hovered_url {
                             ui.label(RichText::new(hovered).size(12.0).color(Color32::from_rgb(40, 90, 180)));
                         } else {
-                            let mode_desc = if tab.web_mode { "Web Canvas" } else { "Print View" };
+                            let mode_desc = if tab.view_source {
+                                "Source Code View"
+                            } else if tab.web_mode {
+                                "Web Canvas"
+                            } else {
+                                "Print View"
+                            };
                             ui.label(RichText::new(format!("Lumra 0.2.0 • {} หน้า • {}", tab.pages.len(), mode_desc)).size(12.0).color(Color32::from_rgb(120, 120, 120)));
                         }
                     }
@@ -313,7 +367,7 @@ impl eframe::App for LumraApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(226, 232, 240)))
             .show(ctx, |ui| {
-                if let Some(tab) = self.tabs.get(self.active_tab) {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     let outcome = render_viewport(
                         ui,
                         &tab.pages,
@@ -322,6 +376,10 @@ impl eframe::App for LumraApp {
                         tab.error_message.as_deref(),
                         tab.zoom,
                         tab.web_mode,
+                        tab.view_source,
+                        &tab.raw_source,
+                        &mut tab.find_state,
+                        &mut tab.selection_state,
                     );
 
                     self.hovered_url = outcome.hovered_link;
@@ -351,6 +409,30 @@ impl eframe::App for LumraApp {
         if action.toggle_web_mode {
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                 tab.web_mode = !tab.web_mode;
+            }
+        }
+        if action.toggle_view_source {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.view_source = !tab.view_source;
+            }
+        }
+        if action.toggle_find {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.find_state.is_open = !tab.find_state.is_open;
+            }
+        }
+        if action.toggle_bookmark {
+            if let Some(tab) = self.tabs.get(self.active_tab) {
+                let cur_url = tab.current_url.clone();
+                let cur_title = tab.title.clone();
+                if let Some(pos) = self.bookmarks.iter().position(|b| b.url == cur_url) {
+                    self.bookmarks.remove(pos);
+                } else {
+                    self.bookmarks.push(Bookmark {
+                        title: cur_title,
+                        url: cur_url,
+                    });
+                }
             }
         }
         if action.zoom_in {
