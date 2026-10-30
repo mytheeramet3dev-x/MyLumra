@@ -23,6 +23,7 @@ pub struct TabState {
     pub is_loading: bool,
     pub error_message: Option<String>,
     pub zoom: f32,
+    pub web_mode: bool,
 }
 
 impl TabState {
@@ -39,6 +40,7 @@ impl TabState {
             is_loading: true,
             error_message: None,
             zoom: 1.0,
+            web_mode: true,
         }
     }
 }
@@ -52,6 +54,7 @@ pub struct LumraApp {
     rx: Receiver<NavigationResult>,
     hovered_url: Option<String>,
     next_tab_id: usize,
+    last_viewport_size: [f32; 2],
 }
 
 impl LumraApp {
@@ -107,6 +110,7 @@ impl LumraApp {
             rx,
             hovered_url: None,
             next_tab_id: 1,
+            last_viewport_size: [900.0, 700.0],
         };
 
         app.trigger_navigation(0, initial_url.to_string());
@@ -117,6 +121,7 @@ impl LumraApp {
         let font_store = self.font_store.clone();
         let fetcher = self.fetcher.clone();
         let tx = self.tx.clone();
+        let [vp_w, vp_h] = self.last_viewport_size;
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -128,9 +133,17 @@ impl LumraApp {
                 Err(e) => Err(anyhow::anyhow!("Runtime error: {}", e)),
             };
 
-            let compile_res = match content_res {
-                Ok(source) => compile_and_render(font_store, &source, 2.0),
-                Err(e) => Err(e),
+            let compile_res = match &content_res {
+                Ok(source) => compile_and_render(
+                    font_store,
+                    fetcher,
+                    &url,
+                    source,
+                    vp_w,
+                    vp_h,
+                    2.0,
+                ),
+                Err(e) => Err(anyhow::anyhow!("{}", e)),
             };
 
             let _ = tx.send(NavigationResult {
@@ -216,6 +229,10 @@ impl LumraApp {
 
 impl eframe::App for LumraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Track viewport size for responsive layout
+        let screen = ctx.screen_rect();
+        self.last_viewport_size = [screen.width(), screen.height()];
+
         // 1. Process async navigation results
         while let Ok(nav) = self.rx.try_recv() {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == nav.tab_id) {
@@ -267,6 +284,7 @@ impl eframe::App for LumraApp {
                         can_back,
                         can_forward,
                         tab.zoom,
+                        tab.web_mode,
                         tab.is_loading,
                         &mut action,
                     );
@@ -284,7 +302,8 @@ impl eframe::App for LumraApp {
                         } else if let Some(ref hovered) = self.hovered_url {
                             ui.label(RichText::new(hovered).size(12.0).color(Color32::from_rgb(40, 90, 180)));
                         } else {
-                            ui.label(RichText::new(format!("Lumra 0.2.0 • {} หน้า", tab.pages.len())).size(12.0).color(Color32::from_rgb(120, 120, 120)));
+                            let mode_desc = if tab.web_mode { "Web Canvas" } else { "Print View" };
+                            ui.label(RichText::new(format!("Lumra 0.2.0 • {} หน้า • {}", tab.pages.len(), mode_desc)).size(12.0).color(Color32::from_rgb(120, 120, 120)));
                         }
                     }
                 });
@@ -302,6 +321,7 @@ impl eframe::App for LumraApp {
                         tab.is_loading,
                         tab.error_message.as_deref(),
                         tab.zoom,
+                        tab.web_mode,
                     );
 
                     self.hovered_url = outcome.hovered_link;
@@ -327,6 +347,11 @@ impl eframe::App for LumraApp {
         }
         if action.go_home {
             self.navigate("lumra://home".to_string());
+        }
+        if action.toggle_web_mode {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.web_mode = !tab.web_mode;
+            }
         }
         if action.zoom_in {
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {

@@ -12,6 +12,7 @@ pub struct NavbarAction {
     pub new_tab: bool,
     pub close_tab: Option<usize>,
     pub switch_tab: Option<usize>,
+    pub toggle_web_mode: bool,
 }
 
 impl Default for NavbarAction {
@@ -28,6 +29,7 @@ impl Default for NavbarAction {
             new_tab: false,
             close_tab: None,
             switch_tab: None,
+            toggle_web_mode: false,
         }
     }
 }
@@ -89,6 +91,7 @@ pub fn render_navbar(
     can_back: bool,
     can_forward: bool,
     zoom: f32,
+    web_mode: bool,
     is_loading: bool,
     action: &mut NavbarAction,
 ) -> Response {
@@ -112,13 +115,26 @@ pub fn render_navbar(
 
         // Address Bar
         let response = ui.add_sized(
-            [ui.available_width() - 170.0, 24.0],
+            [ui.available_width() - 250.0, 24.0],
             egui::TextEdit::singleline(url_input)
                 .hint_text("พิมพ์ URL (เช่น lumra://home หรือ https://...) แล้วกด Enter"),
         );
 
         if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
             action.navigate_to = Some(url_input.clone());
+        }
+
+        ui.separator();
+
+        // Mode Toggle: Web Continuous vs Document Print View
+        let mode_label = if web_mode { "🌐 Web" } else { "📄 Doc" };
+        let mode_tooltip = if web_mode {
+            "โหมดเว็บต่อเนื่อง (คลิกเพื่อเปลี่ยนเป็นมุมมองเอกสาร)"
+        } else {
+            "โหมดเอกสารหน้า A4 (คลิกเพื่อเปลี่ยนเป็นมุมมองเว็บ)"
+        };
+        if ui.button(mode_label).on_hover_text(mode_tooltip).clicked() {
+            action.toggle_web_mode = true;
         }
 
         ui.separator();

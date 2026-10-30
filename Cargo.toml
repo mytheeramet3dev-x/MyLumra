@@ -10,7 +10,7 @@ typst = "0.13"
 typst-render = "0.13"
 typst-assets = { version = "0.13", features = ["fonts"] }
 ttf-parser = "0.24"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "blocking"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 tiny-skia = "0.11"
 fontdb = "0.16"

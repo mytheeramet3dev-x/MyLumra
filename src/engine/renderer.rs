@@ -4,6 +4,7 @@ use egui::ColorImage;
 use typst::layout::{Frame, FrameItem, PagedDocument, Point};
 use typst::model::Destination;
 use super::world::{FontStore, LumraWorld};
+use crate::net::ContentFetcher;
 
 #[derive(Clone, Debug)]
 pub struct RenderedLink {
@@ -22,7 +23,11 @@ pub struct PageRender {
 
 pub fn compile_and_render(
     font_store: Arc<FontStore>,
+    fetcher: Arc<ContentFetcher>,
+    url: &str,
     source: &str,
+    viewport_width: f32,
+    viewport_height: f32,
     scale: f32,
 ) -> Result<Vec<PageRender>> {
     // Ensure math equations always have fallback to New Computer Modern Math if not specified
@@ -32,7 +37,14 @@ pub fn compile_and_render(
         source.to_string()
     };
 
-    let world = LumraWorld::new(font_store, full_source);
+    let world = LumraWorld::new(
+        font_store,
+        fetcher,
+        Some(url.to_string()),
+        full_source,
+        viewport_width,
+        viewport_height,
+    );
     let result = typst::compile::<PagedDocument>(&world);
 
     let document = match result.output {
@@ -103,17 +115,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_compile_typst_document_with_links() {
+    fn test_compile_typst_document_with_links_and_assets() {
         let font_store = Arc::new(FontStore::init());
+        let fetcher = Arc::new(ContentFetcher::new());
         let source = r#"
             #set text(font: "Libertinus Serif")
-            = Test Document with Math
+            = Test Document with Math and Image
             Hello from Lumra test!
             Here is a math formula:
             $ sum_(k=1)^n k = (n(n+1)) / 2 $
+            Here is an asset image:
+            #image("lumra://assets/logo.svg", width: 40pt)
             Here is a link: #link("lumra://home")[Home Link]
         "#;
-        let pages = compile_and_render(font_store, source, 1.0).expect("Compilation failed");
+        let pages = compile_and_render(
+            font_store,
+            fetcher,
+            "lumra://test",
+            source,
+            800.0,
+            600.0,
+            1.0,
+        )
+        .expect("Compilation failed");
         assert_eq!(pages.len(), 1);
         assert!(!pages[0].links.is_empty(), "Link should be detected");
         assert_eq!(pages[0].links[0].target, "lumra://home");

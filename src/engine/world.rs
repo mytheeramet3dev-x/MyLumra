@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use chrono::{Datelike, Utc};
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
@@ -7,6 +7,8 @@ use typst::syntax::{FileId, Source, VirtualPath};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, World};
+
+use crate::net::ContentFetcher;
 
 /// Holds pre-loaded font metadata and font buffers
 pub struct FontStore {
@@ -58,29 +60,57 @@ impl FontStore {
 pub struct LumraWorld {
     library: LazyHash<Library>,
     fonts: Arc<FontStore>,
+    fetcher: Arc<ContentFetcher>,
+    base_url: Option<String>,
     main_id: FileId,
     source: Source,
-    files: HashMap<FileId, Bytes>,
+    file_cache: Mutex<HashMap<FileId, Bytes>>,
+    source_cache: Mutex<HashMap<FileId, Source>>,
 }
 
 impl LumraWorld {
-    pub fn new(fonts: Arc<FontStore>, content: String) -> Self {
+    pub fn new(
+        fonts: Arc<FontStore>,
+        fetcher: Arc<ContentFetcher>,
+        base_url: Option<String>,
+        content: String,
+        viewport_width: f32,
+        viewport_height: f32,
+    ) -> Self {
         let main_id = FileId::new_fake(VirtualPath::new("index.typ"));
         let source = Source::new(main_id, content);
 
+        let mut inputs = typst::foundations::Dict::new();
+        inputs.insert(
+            "viewport-width".into(),
+            typst::foundations::Value::Str(format!("{:.0}", viewport_width).into()),
+        );
+        inputs.insert(
+            "viewport-height".into(),
+            typst::foundations::Value::Str(format!("{:.0}", viewport_height).into()),
+        );
+        if let Some(ref url) = base_url {
+            inputs.insert("url".into(), typst::foundations::Value::Str(url.clone().into()));
+        }
+
+        let library = Library::builder().with_inputs(inputs).build();
+
         Self {
-            library: LazyHash::new(Library::default()),
+            library: LazyHash::new(library),
             fonts,
+            fetcher,
+            base_url,
             main_id,
             source,
-            files: HashMap::new(),
+            file_cache: Mutex::new(HashMap::new()),
+            source_cache: Mutex::new(HashMap::new()),
         }
     }
 
     #[allow(dead_code)]
-    pub fn set_file(&mut self, path: &str, bytes: Bytes) {
+    pub fn set_file(&self, path: &str, bytes: Bytes) {
         let id = FileId::new_fake(VirtualPath::new(path));
-        self.files.insert(id, bytes);
+        self.file_cache.lock().unwrap().insert(id, bytes);
     }
 }
 
@@ -99,19 +129,61 @@ impl World for LumraWorld {
 
     fn source(&self, id: FileId) -> FileResult<Source> {
         if id == self.main_id {
-            Ok(self.source.clone())
-        } else {
-            Err(FileError::NotFound(std::path::PathBuf::from("Not found")))
+            return Ok(self.source.clone());
+        }
+
+        // Check cache
+        {
+            let cache = self.source_cache.lock().unwrap();
+            if let Some(src) = cache.get(&id) {
+                return Ok(src.clone());
+            }
+        }
+
+        // Resolve path to URL
+        let path_str = id.vpath().as_rootless_path().to_string_lossy();
+        let resolved_url = self.fetcher.resolve_url(self.base_url.as_deref(), &path_str);
+
+        match self.fetcher.fetch_text_blocking(&resolved_url) {
+            Ok(text) => {
+                let src = Source::new(id, text);
+                self.source_cache.lock().unwrap().insert(id, src.clone());
+                Ok(src)
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch source {}: {}", resolved_url, e);
+                Err(FileError::NotFound(std::path::PathBuf::from(path_str.to_string())))
+            }
         }
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        if let Some(data) = self.files.get(&id) {
-            Ok(data.clone())
-        } else if id == self.main_id {
-            Ok(Bytes::new(self.source.text().as_bytes().to_vec()))
-        } else {
-            Err(FileError::NotFound(std::path::PathBuf::from("Not found")))
+        if id == self.main_id {
+            return Ok(Bytes::new(self.source.text().as_bytes().to_vec()));
+        }
+
+        // Check cache
+        {
+            let cache = self.file_cache.lock().unwrap();
+            if let Some(bytes) = cache.get(&id) {
+                return Ok(bytes.clone());
+            }
+        }
+
+        // Resolve path to URL
+        let path_str = id.vpath().as_rootless_path().to_string_lossy();
+        let resolved_url = self.fetcher.resolve_url(self.base_url.as_deref(), &path_str);
+
+        match self.fetcher.fetch_bytes_blocking(&resolved_url) {
+            Ok(raw) => {
+                let bytes = Bytes::new(raw.to_vec());
+                self.file_cache.lock().unwrap().insert(id, bytes.clone());
+                Ok(bytes)
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch asset {}: {}", resolved_url, e);
+                Err(FileError::NotFound(std::path::PathBuf::from(path_str.to_string())))
+            }
         }
     }
 

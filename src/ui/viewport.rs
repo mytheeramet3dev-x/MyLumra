@@ -13,6 +13,7 @@ pub fn render_viewport(
     is_loading: bool,
     error_message: Option<&str>,
     zoom: f32,
+    web_mode: bool,
 ) -> ViewportOutcome {
     let mut outcome = ViewportOutcome {
         clicked_link: None,
@@ -39,89 +40,111 @@ pub fn render_viewport(
         return outcome;
     }
 
-    ScrollArea::both()
-        .auto_shrink([false, false])
+    let bg_fill = if web_mode {
+        Color32::WHITE
+    } else {
+        Color32::from_rgb(226, 232, 240)
+    };
+
+    egui::Frame::none()
+        .fill(bg_fill)
         .show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(15.0);
+            ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        if !web_mode {
+                            ui.add_space(15.0);
+                        }
 
-                for (idx, texture) in textures.iter().enumerate() {
-                    let page_data = pages.get(idx);
-                    let display_size = Vec2::new(
-                        texture.size()[0] as f32 * zoom,
-                        texture.size()[1] as f32 * zoom,
-                    );
+                        for (idx, texture) in textures.iter().enumerate() {
+                            let page_data = pages.get(idx);
+                            let display_size = Vec2::new(
+                                texture.size()[0] as f32 * zoom,
+                                texture.size()[1] as f32 * zoom,
+                            );
 
-                    // Document shadow and border frame
-                    let (rect, response) = ui.allocate_exact_size(display_size, egui::Sense::click_and_drag());
+                            let (rect, response) = ui.allocate_exact_size(display_size, egui::Sense::click_and_drag());
 
-                    // Draw paper shadow and white background
-                    let shadow_rect = rect.expand(2.0);
-                    ui.painter().rect_filled(
-                        shadow_rect,
-                        egui::Rounding::same(4.0),
-                        Color32::from_black_alpha(25),
-                    );
-                    ui.painter().rect_filled(
-                        rect,
-                        egui::Rounding::same(2.0),
-                        Color32::WHITE,
-                    );
+                            if !web_mode {
+                                // Draw paper shadow in doc mode
+                                let shadow_rect = rect.expand(2.0);
+                                ui.painter().rect_filled(
+                                    shadow_rect,
+                                    egui::Rounding::same(4.0),
+                                    Color32::from_black_alpha(25),
+                                );
+                            }
 
-                    // Paint texture onto the rect
-                    ui.painter().image(
-                        texture.id(),
-                        rect,
-                        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
+                            ui.painter().rect_filled(
+                                rect,
+                                egui::Rounding::same(if web_mode { 0.0 } else { 2.0 }),
+                                Color32::WHITE,
+                            );
 
-                    // Draw clean page boundary
-                    ui.painter().rect_stroke(
-                        rect,
-                        egui::Rounding::same(2.0),
-                        Stroke::new(1.0_f32, Color32::from_gray(210)),
-                    );
+                            // Paint texture onto the rect
+                            ui.painter().image(
+                                texture.id(),
+                                rect,
+                                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
 
-                    // Check mouse interaction with links on this page
-                    if let Some(page) = page_data {
-                        if let Some(hover_pos) = ui.input(|i| i.pointer.hover_pos()) {
-                            if rect.contains(hover_pos) {
-                                for link in &page.links {
-                                    // Scale link rect by zoom factor
-                                    let link_x = rect.min.x + (link.rect.min.x * zoom);
-                                    let link_y = rect.min.y + (link.rect.min.y * zoom);
-                                    let link_w = link.rect.width() * zoom;
-                                    let link_h = link.rect.height() * zoom;
+                            if !web_mode {
+                                // Draw clean page boundary in doc mode
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    egui::Rounding::same(2.0),
+                                    Stroke::new(1.0_f32, Color32::from_gray(210)),
+                                );
+                            }
 
-                                    let link_screen_rect = Rect::from_min_size(
-                                        egui::pos2(link_x, link_y),
-                                        egui::vec2(link_w, link_h),
-                                    );
+                            // Check mouse interaction with links on this page
+                            if let Some(page) = page_data {
+                                if let Some(hover_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                                    if rect.contains(hover_pos) {
+                                        for link in &page.links {
+                                            // Scale link rect by zoom factor
+                                            let link_x = rect.min.x + (link.rect.min.x * zoom);
+                                            let link_y = rect.min.y + (link.rect.min.y * zoom);
+                                            let link_w = link.rect.width() * zoom;
+                                            let link_h = link.rect.height() * zoom;
 
-                                    if link_screen_rect.contains(hover_pos) {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        outcome.hovered_link = Some(link.target.clone());
+                                            let link_screen_rect = Rect::from_min_size(
+                                                egui::pos2(link_x, link_y),
+                                                egui::vec2(link_w, link_h),
+                                            );
 
-                                        // Highlight link on hover with subtle outline
-                                        ui.painter().rect_stroke(
-                                            link_screen_rect.expand(1.0),
-                                            egui::Rounding::same(2.0),
-                                            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(66, 153, 225, 120)),
-                                        );
+                                            if link_screen_rect.contains(hover_pos) {
+                                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                outcome.hovered_link = Some(link.target.clone());
 
-                                        if response.clicked() {
-                                            outcome.clicked_link = Some(link.target.clone());
+                                                // Highlight link on hover with subtle outline
+                                                ui.painter().rect_stroke(
+                                                    link_screen_rect.expand(1.0),
+                                                    egui::Rounding::same(2.0),
+                                                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(66, 153, 225, 120)),
+                                                );
+
+                                                if response.clicked() {
+                                                    outcome.clicked_link = Some(link.target.clone());
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                    }
 
-                    ui.add_space(20.0);
-                }
-            });
+                            if !web_mode {
+                                ui.add_space(20.0);
+                            }
+                        }
+
+                        if !web_mode {
+                            ui.add_space(20.0);
+                        }
+                    });
+                });
         });
 
     outcome
