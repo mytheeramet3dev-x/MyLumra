@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use eframe::egui::{self, Color32, RichText};
-use crate::engine::{compile_and_render, FontStore, PageRender};
+use crate::engine::{compile_and_render, FontStore, LumraAction, PageRender};
 use crate::net::ContentFetcher;
 use crate::ui::{
     render_bookmarks_bar, render_navbar, render_tabs, render_viewport, Bookmark, FindState,
@@ -32,6 +33,7 @@ pub struct TabState {
     pub raw_source: String,
     pub find_state: FindState,
     pub selection_state: SelectionState,
+    pub state: HashMap<String, String>,
 }
 
 impl TabState {
@@ -53,6 +55,7 @@ impl TabState {
             raw_source: String::new(),
             find_state: FindState::default(),
             selection_state: SelectionState::default(),
+            state: HashMap::new(),
         }
     }
 }
@@ -146,11 +149,11 @@ impl LumraApp {
             bookmarks: default_bookmarks,
         };
 
-        app.trigger_navigation(0, initial_url.to_string());
+        app.trigger_navigation(0, initial_url.to_string(), HashMap::new());
         app
     }
 
-    fn trigger_navigation(&self, tab_id: usize, url: String) {
+    fn trigger_navigation(&self, tab_id: usize, url: String, state: HashMap<String, String>) {
         let font_store = self.font_store.clone();
         let fetcher = self.fetcher.clone();
         let tx = self.tx.clone();
@@ -177,6 +180,7 @@ impl LumraApp {
                     vp_w,
                     vp_h,
                     2.0,
+                    &state,
                 ),
                 Err(e) => Err(anyhow::anyhow!("{}", e)),
             };
@@ -190,12 +194,52 @@ impl LumraApp {
         });
     }
 
+    fn dispatch_action(&mut self, action_url: &str) {
+        if let Some(act) = LumraAction::parse(action_url) {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                act.apply(&mut tab.state);
+
+                // Fast in-memory re-compilation with updated state
+                let source = tab.raw_source.clone();
+                let url = tab.current_url.clone();
+                let tab_id = tab.id;
+                let state = tab.state.clone();
+                let font_store = self.font_store.clone();
+                let fetcher = self.fetcher.clone();
+                let [vp_w, vp_h] = self.last_viewport_size;
+                let tx = self.tx.clone();
+
+                std::thread::spawn(move || {
+                    let compile_res = compile_and_render(
+                        font_store,
+                        fetcher,
+                        &url,
+                        &source,
+                        vp_w,
+                        vp_h,
+                        2.0,
+                        &state,
+                    );
+                    let _ = tx.send(NavigationResult {
+                        tab_id,
+                        url,
+                        raw_source: source,
+                        result: compile_res,
+                    });
+                });
+            }
+        }
+    }
+
     fn navigate(&mut self, url: String) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.is_loading = true;
             tab.error_message = None;
             tab.url_input = url.clone();
             tab.view_source = false;
+
+            // Reset tab reactive state on new navigation
+            tab.state.clear();
 
             // Append to history if it's a new location
             if tab.history.get(tab.history_index) != Some(&url) {
@@ -205,7 +249,8 @@ impl LumraApp {
             }
 
             let tab_id = tab.id;
-            self.trigger_navigation(tab_id, url);
+            let tab_state = tab.state.clone();
+            self.trigger_navigation(tab_id, url, tab_state);
         }
     }
 
@@ -217,8 +262,9 @@ impl LumraApp {
                 tab.is_loading = true;
                 tab.url_input = prev_url.clone();
                 tab.view_source = false;
+                tab.state.clear();
                 let tab_id = tab.id;
-                self.trigger_navigation(tab_id, prev_url);
+                self.trigger_navigation(tab_id, prev_url, HashMap::new());
             }
         }
     }
@@ -231,8 +277,9 @@ impl LumraApp {
                 tab.is_loading = true;
                 tab.url_input = next_url.clone();
                 tab.view_source = false;
+                tab.state.clear();
                 let tab_id = tab.id;
-                self.trigger_navigation(tab_id, next_url);
+                self.trigger_navigation(tab_id, next_url, HashMap::new());
             }
         }
     }
@@ -242,7 +289,8 @@ impl LumraApp {
             let current = tab.current_url.clone();
             tab.is_loading = true;
             let tab_id = tab.id;
-            self.trigger_navigation(tab_id, current);
+            let tab_state = tab.state.clone();
+            self.trigger_navigation(tab_id, current, tab_state);
         }
     }
 
@@ -253,7 +301,7 @@ impl LumraApp {
         let new_tab = TabState::new(new_id, url);
         self.tabs.push(new_tab);
         self.active_tab = self.tabs.len() - 1;
-        self.trigger_navigation(new_id, url.to_string());
+        self.trigger_navigation(new_id, url.to_string(), HashMap::new());
     }
 
     fn close_tab(&mut self, idx: usize) {
@@ -392,7 +440,11 @@ impl eframe::App for LumraApp {
 
         // 5. Handle User Actions
         if let Some(target) = action.navigate_to {
-            self.navigate(target);
+            if target.starts_with("lumra-action://") {
+                self.dispatch_action(&target);
+            } else {
+                self.navigate(target);
+            }
         }
         if action.go_back {
             self.go_back();

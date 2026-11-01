@@ -76,6 +76,7 @@ impl LumraWorld {
         content: String,
         viewport_width: f32,
         viewport_height: f32,
+        custom_inputs: &HashMap<String, String>,
     ) -> Self {
         let main_id = FileId::new_fake(VirtualPath::new("index.typ"));
         let source = Source::new(main_id, content);
@@ -91,6 +92,14 @@ impl LumraWorld {
         );
         if let Some(ref url) = base_url {
             inputs.insert("url".into(), typst::foundations::Value::Str(url.clone().into()));
+        }
+
+        // Inject custom state inputs from Lumra runtime
+        for (k, v) in custom_inputs {
+            inputs.insert(
+                k.as_str().into(),
+                typst::foundations::Value::Str(v.as_str().into()),
+            );
         }
 
         let library = Library::builder().with_inputs(inputs).build();
