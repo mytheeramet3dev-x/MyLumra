@@ -34,6 +34,10 @@ pub struct TabState {
     pub find_state: FindState,
     pub selection_state: SelectionState,
     pub state: HashMap<String, String>,
+    pub last_file_mod: Option<std::time::SystemTime>,
+    #[allow(dead_code)]
+    pub last_etag: Option<String>,
+    pub last_check_time: std::time::Instant,
 }
 
 impl TabState {
@@ -56,6 +60,9 @@ impl TabState {
             find_state: FindState::default(),
             selection_state: SelectionState::default(),
             state: HashMap::new(),
+            last_file_mod: None,
+            last_etag: None,
+            last_check_time: std::time::Instant::now(),
         }
     }
 }
@@ -123,16 +130,24 @@ impl LumraApp {
                 url: "lumra://home".to_string(),
             },
             Bookmark {
+                title: "⚡ Counter (Interactive)".to_string(),
+                url: "file:///Users/home/Desktop/project/lumra-web/examples/counter.typ".to_string(),
+            },
+            Bookmark {
+                title: "🌐 Lumra-Web".to_string(),
+                url: "file:///Users/home/Desktop/project/lumra-web/examples/landing.typ".to_string(),
+            },
+            Bookmark {
+                title: "📖 Blog & Math".to_string(),
+                url: "file:///Users/home/Desktop/project/lumra-web/examples/blog.typ".to_string(),
+            },
+            Bookmark {
+                title: "🧩 UI Kit".to_string(),
+                url: "file:///Users/home/Desktop/project/lumra-web/examples/components_gallery.typ".to_string(),
+            },
+            Bookmark {
                 title: "📖 Cheatsheet".to_string(),
                 url: "lumra://cheatsheet".to_string(),
-            },
-            Bookmark {
-                title: "ℹ️ About".to_string(),
-                url: "lumra://about".to_string(),
-            },
-            Bookmark {
-                title: "🌟 Showcase".to_string(),
-                url: "sample.typ".to_string(),
             },
         ];
 
@@ -319,6 +334,33 @@ impl eframe::App for LumraApp {
         // Track viewport size for responsive layout
         let screen = ctx.screen_rect();
         self.last_viewport_size = [screen.width(), screen.height()];
+
+        // 0. Live Reload check for local development (Milestone 2)
+        let mut need_reload = false;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            if tab.last_check_time.elapsed() >= std::time::Duration::from_millis(250) {
+                tab.last_check_time = std::time::Instant::now();
+
+                if tab.current_url.starts_with("file://") && !tab.is_loading {
+                    let path_str = tab.current_url.trim_start_matches("file://");
+                    if let Ok(meta) = std::fs::metadata(path_str) {
+                        if let Ok(mod_time) = meta.modified() {
+                            if let Some(prev) = tab.last_file_mod {
+                                if mod_time > prev {
+                                    tab.last_file_mod = Some(mod_time);
+                                    need_reload = true;
+                                }
+                            } else {
+                                tab.last_file_mod = Some(mod_time);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if need_reload {
+            self.reload();
+        }
 
         // 1. Process async navigation results
         while let Ok(nav) = self.rx.try_recv() {
