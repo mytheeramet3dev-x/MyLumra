@@ -6,4 +6,4 @@ pub mod document;
 pub use world::FontStore;
 pub use renderer::{compile_and_render, PageRender};
 pub use action::LumraAction;
-pub use document::{DocumentMetadata, DocumentModel, LinkEntry, TextEntry};
+pub use document::DocumentModel;
