@@ -451,7 +451,9 @@ impl eframe::App for LumraApp {
                         tab.pages = pages;
                         tab.current_url = nav.url.clone();
                         tab.url_input = nav.url.clone();
-                        tab.title = extract_tab_title(&nav.url);
+                        tab.title = tab.document.as_ref()
+                            .map(|document| document.metadata.title.clone())
+                            .unwrap_or_else(|| extract_tab_title(&nav.url));
                         tab.navigation_state = NavigationState::Ready;
                     }
                     Err(e) => {
