@@ -135,7 +135,7 @@ mod tests {
 
     fn test_page() -> PageRender {
         PageRender {
-            image: egui::ColorImage::new([1, 1], egui::Color32::WHITE),
+            image: egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]),
             width_pt: 100.0,
             height_pt: 100.0,
             links: vec![RenderedLink {
