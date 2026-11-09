@@ -5,6 +5,38 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use url::Url;
 
+const MAX_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_ASSET_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_REDIRECTS: usize = 5;
+
+fn validate_http_url(raw: &str) -> Result<Url> {
+    let parsed = Url::parse(raw).map_err(|e| anyhow!("Invalid URL {}: {}", raw, e))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed),
+        scheme => Err(anyhow!("Unsupported URL scheme: {}", scheme)),
+    }
+}
+
+fn read_text_file_limited(path: &Path, max_bytes: u64) -> Result<String> {
+    let bytes = read_bytes_file_limited(path, max_bytes)?;
+    String::from_utf8(bytes)
+        .map_err(|e| anyhow!("File is not valid UTF-8: {}", e))
+}
+
+fn read_bytes_file_limited(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > max_bytes {
+        return Err(anyhow!("File exceeds the {} byte limit", max_bytes));
+    }
+
+    let bytes = std::fs::read(path)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(anyhow!("File exceeds the {} byte limit", max_bytes));
+    }
+    Ok(bytes)
+}
+
 pub struct ContentFetcher {
     async_client: reqwest::Client,
     blocking_client: reqwest::blocking::Client,
@@ -16,6 +48,7 @@ impl ContentFetcher {
         let async_client = reqwest::Client::builder()
             .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
             .timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
             .build()
             .unwrap_or_default();
 
@@ -100,13 +133,13 @@ impl ContentFetcher {
         // 2. Local file:// scheme
         if let Some(path) = trimmed.strip_prefix("file://") {
             let path_buf = PathBuf::from(path);
-            return std::fs::read_to_string(&path_buf)
+            return read_text_file_limited(&path_buf, MAX_DOCUMENT_BYTES)
                 .map_err(|e| anyhow!("Failed to read file {}: {}", path, e));
         }
 
         // Check if direct local path
         if Path::new(trimmed).is_file() {
-            return std::fs::read_to_string(trimmed)
+            return read_text_file_limited(Path::new(trimmed), MAX_DOCUMENT_BYTES)
                 .map_err(|e| anyhow!("Failed to read file {}: {}", trimmed, e));
         }
 
@@ -117,6 +150,7 @@ impl ContentFetcher {
             trimmed.to_string()
         };
 
+        validate_http_url(&resolved_url)?;
         let response = self
             .async_client
             .get(&resolved_url)
@@ -129,12 +163,20 @@ impl ContentFetcher {
             return Err(anyhow!("HTTP Status: {}", response.status()));
         }
 
-        let text = response
-            .text()
-            .await
-            .map_err(|e| anyhow!("Failed to decode response: {}", e))?;
+        if response.content_length().is_some_and(|len| len > MAX_DOCUMENT_BYTES) {
+            return Err(anyhow!("Document exceeds the {} byte limit", MAX_DOCUMENT_BYTES));
+        }
 
-        Ok(text)
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
+        if body.len() as u64 > MAX_DOCUMENT_BYTES {
+            return Err(anyhow!("Document exceeds the {} byte limit", MAX_DOCUMENT_BYTES));
+        }
+
+        String::from_utf8(body.to_vec())
+            .map_err(|e| anyhow!("Document is not valid UTF-8: {}", e))
     }
 
     /// Synchronous fetch for text (used by #import and #include)
@@ -169,7 +211,7 @@ impl ContentFetcher {
 
         // 3. Handle file:// scheme
         if let Some(path) = trimmed.strip_prefix("file://") {
-            let data = std::fs::read(path)
+            let data = read_bytes_file_limited(Path::new(path), MAX_ASSET_BYTES)
                 .map_err(|e| anyhow!("Failed to read local asset {}: {}", path, e))?;
             let bytes = Bytes::from(data);
             self.cache_asset(&normalized, bytes.clone());
@@ -179,10 +221,10 @@ impl ContentFetcher {
         // 4. Handle direct local filesystem path
         let local_path = Path::new(trimmed);
         if local_path.is_file() {
-            let data = std::fs::read(local_path)
+            let data = read_bytes_file_limited(local_path, MAX_ASSET_BYTES)
                 .map_err(|e| anyhow!("Failed to read local file {}: {}", trimmed, e))?;
             let bytes = Bytes::from(data);
-            self.cache_asset(url_str, bytes.clone());
+            self.cache_asset(&normalized, bytes.clone());
             return Ok(bytes);
         }
 
@@ -193,6 +235,7 @@ impl ContentFetcher {
             trimmed.to_string()
         };
 
+        validate_http_url(&resolved_url)?;
         let response = self
             .blocking_client
             .get(&resolved_url)
@@ -204,17 +247,39 @@ impl ContentFetcher {
             return Err(anyhow!("HTTP Status {} for {}", response.status(), resolved_url));
         }
 
+        if response.content_length().is_some_and(|len| len > MAX_ASSET_BYTES) {
+            return Err(anyhow!("Asset exceeds the {} byte limit", MAX_ASSET_BYTES));
+        }
+
         let raw = response
             .bytes()
             .map_err(|e| anyhow!("Failed to download {}: {}", resolved_url, e))?;
+        if raw.len() as u64 > MAX_ASSET_BYTES {
+            return Err(anyhow!("Asset exceeds the {} byte limit", MAX_ASSET_BYTES));
+        }
 
-        self.cache_asset(url_str, raw.clone());
+        self.cache_asset(&normalized, raw.clone());
         Ok(raw)
     }
 
     fn cache_asset(&self, key: &str, bytes: Bytes) {
+        if bytes.len() > MAX_CACHE_BYTES {
+            return;
+        }
+
         let mut cache = self.asset_cache.lock().unwrap();
-        cache.insert(key.to_string(), bytes);
+        if let Some(existing) = cache.get(key) {
+            let cached_bytes: usize = cache.values().map(Bytes::len).sum();
+            if cached_bytes - existing.len() + bytes.len() <= MAX_CACHE_BYTES {
+                cache.insert(key.to_string(), bytes);
+            }
+            return;
+        }
+
+        let cached_bytes: usize = cache.values().map(Bytes::len).sum();
+        if cached_bytes + bytes.len() <= MAX_CACHE_BYTES {
+            cache.insert(key.to_string(), bytes);
+        }
     }
 
     fn handle_internal_asset(&self, asset_path: &str) -> Option<Bytes> {
