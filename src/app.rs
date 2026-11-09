@@ -20,7 +20,6 @@ pub struct NavigationResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NavigationState {
-    Idle,
     Loading { request_id: u64 },
     Ready,
     Failed { message: String },
@@ -29,6 +28,10 @@ pub enum NavigationState {
 impl NavigationState {
     fn is_loading(&self) -> bool {
         matches!(self, Self::Loading { .. })
+    }
+
+    fn matches_request(&self, request_id: u64) -> bool {
+        matches!(self, Self::Loading { request_id: current } if *current == request_id)
     }
 
     fn error_message(&self) -> Option<&str> {
@@ -419,7 +422,9 @@ impl eframe::App for LumraApp {
         while let Ok(nav) = self.rx.try_recv() {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == nav.tab_id) {
                 // Ignore results from superseded requests and compilations.
-                if !is_current_request(tab.request_generation, nav.request_id) {
+                if !is_current_request(tab.request_generation, nav.request_id)
+                    || !tab.navigation_state.matches_request(nav.request_id)
+                {
                     continue;
                 }
 
@@ -634,6 +639,8 @@ mod navigation_tests {
     fn navigation_state_reports_loading_and_failure() {
         let loading = NavigationState::Loading { request_id: 12 };
         assert!(loading.is_loading());
+        assert!(loading.matches_request(12));
+        assert!(!loading.matches_request(11));
         assert_eq!(loading.error_message(), None);
 
         let ready = NavigationState::Ready;
