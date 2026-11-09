@@ -62,6 +62,8 @@ pub struct TabState {
     pub raw_source: String,
     pub find_state: FindState,
     pub selection_state: SelectionState,
+    /// One-shot in-document page navigation requested by a Typst page link.
+    pub pending_page_navigation: Option<usize>,
     pub state: HashMap<String, String>,
     pub last_file_mod: Option<std::time::SystemTime>,
     #[allow(dead_code)]
@@ -89,6 +91,7 @@ impl TabState {
             raw_source: String::new(),
             find_state: FindState::default(),
             selection_state: SelectionState::default(),
+            pending_page_navigation: None,
             state: HashMap::new(),
             last_file_mod: None,
             last_etag: None,
@@ -542,8 +545,12 @@ impl eframe::App for LumraApp {
                         &tab.raw_source,
                         &mut tab.find_state,
                         &mut tab.selection_state,
+                        tab.pending_page_navigation,
                     );
 
+                    if outcome.scrolled_to_page.is_some() {
+                        tab.pending_page_navigation = None;
+                    }
                     self.hovered_url = outcome.hovered_link;
 
                     if let Some(clicked) = outcome.clicked_link {
@@ -556,6 +563,8 @@ impl eframe::App for LumraApp {
         if let Some(target) = action.navigate_to {
             if target.starts_with("lumra-action://") {
                 self.dispatch_action(&target);
+            } else if let Some(page_index) = parse_page_fragment(&target, self.tabs[self.active_tab].pages.len()) {
+                self.tabs[self.active_tab].pending_page_navigation = Some(page_index);
             } else {
                 self.navigate(target);
             }
@@ -630,13 +639,31 @@ impl eframe::App for LumraApp {
     }
 }
 
+fn parse_page_fragment(target: &str, page_count: usize) -> Option<usize> {
+    let page_number = target.strip_prefix("#page=")?.parse::<usize>().ok()?;
+    if page_number == 0 || page_number > page_count {
+        return None;
+    }
+    Some(page_number - 1)
+}
+
 fn is_current_request(current_generation: u64, result_generation: u64) -> bool {
     current_generation == result_generation
 }
 
 #[cfg(test)]
 mod navigation_tests {
-    use super::{is_current_request, NavigationState};
+    use super::{is_current_request, parse_page_fragment, NavigationState};
+
+    #[test]
+    fn parses_valid_one_based_page_fragments() {
+        assert_eq!(parse_page_fragment("#page=1", 3), Some(0));
+        assert_eq!(parse_page_fragment("#page=3", 3), Some(2));
+        assert_eq!(parse_page_fragment("#page=0", 3), None);
+        assert_eq!(parse_page_fragment("#page=4", 3), None);
+        assert_eq!(parse_page_fragment("#page=abc", 3), None);
+        assert_eq!(parse_page_fragment("https://example.com/#page=2", 3), None);
+    }
 
     #[test]
     fn accepts_only_the_latest_generation() {
