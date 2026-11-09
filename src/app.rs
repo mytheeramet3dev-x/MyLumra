@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use eframe::egui::{self, Color32, RichText};
-use crate::engine::{compile_and_render, FontStore, LumraAction, PageRender};
+use crate::engine::{compile_and_render, DocumentModel, FontStore, LumraAction, PageRender};
 use crate::net::ContentFetcher;
 use crate::ui::{
     render_bookmarks_bar, render_navbar, render_tabs, render_viewport, Bookmark, FindState,
@@ -11,28 +11,59 @@ use crate::ui::{
 
 pub struct NavigationResult {
     pub tab_id: usize,
+    /// Monotonically increasing per-tab generation; stale results are discarded.
+    pub request_id: u64,
     pub url: String,
     pub raw_source: String,
     pub result: anyhow::Result<Vec<PageRender>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NavigationState {
+    Loading { request_id: u64 },
+    Ready,
+    Failed { message: String },
+}
+
+impl NavigationState {
+    fn is_loading(&self) -> bool {
+        matches!(self, Self::Loading { .. })
+    }
+
+    fn matches_request(&self, request_id: u64) -> bool {
+        matches!(self, Self::Loading { request_id: current } if *current == request_id)
+    }
+
+    fn error_message(&self) -> Option<&str> {
+        match self {
+            Self::Failed { message } => Some(message),
+            _ => None,
+        }
+    }
+}
+
 pub struct TabState {
     pub id: usize,
+    /// Identifies the newest navigation or document compilation requested by this tab.
+    pub request_generation: u64,
     pub title: String,
     pub url_input: String,
     pub current_url: String,
     pub history: Vec<String>,
     pub history_index: usize,
     pub pages: Vec<PageRender>,
+    /// Structured metadata and indexes for the currently committed Typst document.
+    pub document: Option<DocumentModel>,
     pub textures: Vec<egui::TextureHandle>,
-    pub is_loading: bool,
-    pub error_message: Option<String>,
+    pub navigation_state: NavigationState,
     pub zoom: f32,
     pub web_mode: bool,
     pub view_source: bool,
     pub raw_source: String,
     pub find_state: FindState,
     pub selection_state: SelectionState,
+    /// One-shot in-document page navigation requested by a Typst page link.
+    pub pending_page_navigation: Option<usize>,
     pub state: HashMap<String, String>,
     pub last_file_mod: Option<std::time::SystemTime>,
     #[allow(dead_code)]
@@ -44,21 +75,23 @@ impl TabState {
     pub fn new(id: usize, initial_url: &str) -> Self {
         Self {
             id,
+            request_generation: 0,
             title: extract_tab_title(initial_url),
             url_input: initial_url.to_string(),
             current_url: initial_url.to_string(),
             history: vec![initial_url.to_string()],
             history_index: 0,
             pages: Vec::new(),
+            document: None,
             textures: Vec::new(),
-            is_loading: true,
-            error_message: None,
+            navigation_state: NavigationState::Loading { request_id: 0 },
             zoom: 1.0,
             web_mode: true,
             view_source: false,
             raw_source: String::new(),
             find_state: FindState::default(),
             selection_state: SelectionState::default(),
+            pending_page_navigation: None,
             state: HashMap::new(),
             last_file_mod: None,
             last_etag: None,
@@ -122,7 +155,9 @@ impl LumraApp {
         let (tx, rx) = channel();
 
         let initial_url = "lumra://home";
-        let initial_tab = TabState::new(0, initial_url);
+        let mut initial_tab = TabState::new(0, initial_url);
+        initial_tab.request_generation = 1;
+        initial_tab.navigation_state = NavigationState::Loading { request_id: 1 };
 
         let default_bookmarks = vec![
             Bookmark {
@@ -164,11 +199,17 @@ impl LumraApp {
             bookmarks: default_bookmarks,
         };
 
-        app.trigger_navigation(0, initial_url.to_string(), HashMap::new());
+        app.trigger_navigation(0, 1, initial_url.to_string(), HashMap::new());
         app
     }
 
-    fn trigger_navigation(&self, tab_id: usize, url: String, state: HashMap<String, String>) {
+    fn trigger_navigation(
+        &self,
+        tab_id: usize,
+        request_id: u64,
+        url: String,
+        state: HashMap<String, String>,
+    ) {
         let font_store = self.font_store.clone();
         let fetcher = self.fetcher.clone();
         let tx = self.tx.clone();
@@ -202,6 +243,7 @@ impl LumraApp {
 
             let _ = tx.send(NavigationResult {
                 tab_id,
+                request_id,
                 url,
                 raw_source,
                 result: compile_res,
@@ -213,6 +255,13 @@ impl LumraApp {
         if let Some(act) = LumraAction::parse(action_url) {
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                 act.apply(&mut tab.state);
+
+                // A new action compilation supersedes any older compilation for this tab.
+                tab.request_generation = tab.request_generation.wrapping_add(1);
+                tab.navigation_state = NavigationState::Loading {
+                request_id: tab.request_generation,
+            };
+                let request_id = tab.request_generation;
 
                 // Fast in-memory re-compilation with updated state
                 let source = tab.raw_source.clone();
@@ -237,6 +286,7 @@ impl LumraApp {
                     );
                     let _ = tx.send(NavigationResult {
                         tab_id,
+                        request_id,
                         url,
                         raw_source: source,
                         result: compile_res,
@@ -248,8 +298,6 @@ impl LumraApp {
 
     fn navigate(&mut self, url: String) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            tab.is_loading = true;
-            tab.error_message = None;
             tab.url_input = url.clone();
             tab.view_source = false;
 
@@ -263,9 +311,13 @@ impl LumraApp {
                 tab.history_index = tab.history.len() - 1;
             }
 
+            tab.request_generation = tab.request_generation.wrapping_add(1);
+
+            tab.navigation_state = NavigationState::Loading { request_id: tab.request_generation };
             let tab_id = tab.id;
+            let request_id = tab.request_generation;
             let tab_state = tab.state.clone();
-            self.trigger_navigation(tab_id, url, tab_state);
+            self.trigger_navigation(tab_id, request_id, url, tab_state);
         }
     }
 
@@ -274,12 +326,16 @@ impl LumraApp {
             if tab.history_index > 0 {
                 tab.history_index -= 1;
                 let prev_url = tab.history[tab.history_index].clone();
-                tab.is_loading = true;
                 tab.url_input = prev_url.clone();
                 tab.view_source = false;
                 tab.state.clear();
+                tab.request_generation = tab.request_generation.wrapping_add(1);
+                tab.navigation_state = NavigationState::Loading {
+                    request_id: tab.request_generation,
+                };
                 let tab_id = tab.id;
-                self.trigger_navigation(tab_id, prev_url, HashMap::new());
+                let request_id = tab.request_generation;
+                self.trigger_navigation(tab_id, request_id, prev_url, HashMap::new());
             }
         }
     }
@@ -289,12 +345,14 @@ impl LumraApp {
             if tab.history_index + 1 < tab.history.len() {
                 tab.history_index += 1;
                 let next_url = tab.history[tab.history_index].clone();
-                tab.is_loading = true;
-                tab.url_input = next_url.clone();
+                    tab.url_input = next_url.clone();
                 tab.view_source = false;
                 tab.state.clear();
+                tab.request_generation = tab.request_generation.wrapping_add(1);
+                tab.navigation_state = NavigationState::Loading { request_id: tab.request_generation };
                 let tab_id = tab.id;
-                self.trigger_navigation(tab_id, next_url, HashMap::new());
+                let request_id = tab.request_generation;
+                self.trigger_navigation(tab_id, request_id, next_url, HashMap::new());
             }
         }
     }
@@ -302,10 +360,12 @@ impl LumraApp {
     fn reload(&mut self) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             let current = tab.current_url.clone();
-            tab.is_loading = true;
+            tab.request_generation = tab.request_generation.wrapping_add(1);
+            tab.navigation_state = NavigationState::Loading { request_id: tab.request_generation };
             let tab_id = tab.id;
+            let request_id = tab.request_generation;
             let tab_state = tab.state.clone();
-            self.trigger_navigation(tab_id, current, tab_state);
+            self.trigger_navigation(tab_id, request_id, current, tab_state);
         }
     }
 
@@ -313,10 +373,12 @@ impl LumraApp {
         let new_id = self.next_tab_id;
         self.next_tab_id += 1;
 
-        let new_tab = TabState::new(new_id, url);
+        let mut new_tab = TabState::new(new_id, url);
+        new_tab.request_generation = 1;
+        new_tab.navigation_state = NavigationState::Loading { request_id: 1 };
         self.tabs.push(new_tab);
         self.active_tab = self.tabs.len() - 1;
-        self.trigger_navigation(new_id, url.to_string(), HashMap::new());
+        self.trigger_navigation(new_id, 1, url.to_string(), HashMap::new());
     }
 
     fn close_tab(&mut self, idx: usize) {
@@ -341,7 +403,7 @@ impl eframe::App for LumraApp {
             if tab.last_check_time.elapsed() >= std::time::Duration::from_millis(250) {
                 tab.last_check_time = std::time::Instant::now();
 
-                if tab.current_url.starts_with("file://") && !tab.is_loading {
+                if tab.current_url.starts_with("file://") && !tab.navigation_state.is_loading() {
                     let path_str = tab.current_url.trim_start_matches("file://");
                     if let Ok(meta) = std::fs::metadata(path_str) {
                         if let Ok(mod_time) = meta.modified() {
@@ -365,10 +427,21 @@ impl eframe::App for LumraApp {
         // 1. Process async navigation results
         while let Ok(nav) = self.rx.try_recv() {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == nav.tab_id) {
-                tab.is_loading = false;
+                // Ignore results from superseded requests and compilations.
+                if !is_current_request(tab.request_generation, nav.request_id)
+                    || !tab.navigation_state.matches_request(nav.request_id)
+                {
+                    continue;
+                }
+
                 tab.raw_source = nav.raw_source;
                 match nav.result {
                     Ok(pages) => {
+                        tab.document = Some(DocumentModel::from_rendered(
+                            &nav.url,
+                            &tab.raw_source,
+                            &pages,
+                        ));
                         tab.textures.clear();
                         for (idx, page) in pages.iter().enumerate() {
                             let tex = ctx.load_texture(
@@ -381,11 +454,13 @@ impl eframe::App for LumraApp {
                         tab.pages = pages;
                         tab.current_url = nav.url.clone();
                         tab.url_input = nav.url.clone();
-                        tab.title = extract_tab_title(&nav.url);
-                        tab.error_message = None;
+                        tab.title = tab.document.as_ref()
+                            .map(|document| document.metadata.title.clone())
+                            .unwrap_or_else(|| extract_tab_title(&nav.url));
+                        tab.navigation_state = NavigationState::Ready;
                     }
                     Err(e) => {
-                        tab.error_message = Some(e.to_string());
+                        tab.navigation_state = NavigationState::Failed { message: e.to_string() };
                     }
                 }
                 ctx.request_repaint();
@@ -419,7 +494,7 @@ impl eframe::App for LumraApp {
                         tab.web_mode,
                         tab.view_source,
                         is_bm,
-                        tab.is_loading,
+                        tab.navigation_state.is_loading(),
                         &mut action,
                     );
 
@@ -435,7 +510,7 @@ impl eframe::App for LumraApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(tab) = self.tabs.get(self.active_tab) {
-                        if tab.is_loading {
+                        if tab.navigation_state.is_loading() {
                             ui.label(RichText::new("กำลังโหลด...").size(12.0).color(Color32::from_rgb(100, 100, 100)));
                         } else if let Some(ref hovered) = self.hovered_url {
                             ui.label(RichText::new(hovered).size(12.0).color(Color32::from_rgb(40, 90, 180)));
@@ -462,16 +537,20 @@ impl eframe::App for LumraApp {
                         ui,
                         &tab.pages,
                         &tab.textures,
-                        tab.is_loading,
-                        tab.error_message.as_deref(),
+                        tab.navigation_state.is_loading(),
+                        tab.navigation_state.error_message(),
                         tab.zoom,
                         tab.web_mode,
                         tab.view_source,
                         &tab.raw_source,
                         &mut tab.find_state,
                         &mut tab.selection_state,
+                        tab.pending_page_navigation,
                     );
 
+                    if outcome.scrolled_to_page.is_some() {
+                        tab.pending_page_navigation = None;
+                    }
                     self.hovered_url = outcome.hovered_link;
 
                     if let Some(clicked) = outcome.clicked_link {
@@ -484,6 +563,8 @@ impl eframe::App for LumraApp {
         if let Some(target) = action.navigate_to {
             if target.starts_with("lumra-action://") {
                 self.dispatch_action(&target);
+            } else if let Some(page_index) = parse_page_fragment(&target, self.tabs[self.active_tab].pages.len()) {
+                self.tabs[self.active_tab].pending_page_navigation = Some(page_index);
             } else {
                 self.navigate(target);
             }
@@ -555,6 +636,59 @@ impl eframe::App for LumraApp {
                 self.active_tab = idx;
             }
         }
+    }
+}
+
+fn parse_page_fragment(target: &str, page_count: usize) -> Option<usize> {
+    let page_number = target.strip_prefix("#page=")?.parse::<usize>().ok()?;
+    if page_number == 0 || page_number > page_count {
+        return None;
+    }
+    Some(page_number - 1)
+}
+
+fn is_current_request(current_generation: u64, result_generation: u64) -> bool {
+    current_generation == result_generation
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::{is_current_request, parse_page_fragment, NavigationState};
+
+    #[test]
+    fn parses_valid_one_based_page_fragments() {
+        assert_eq!(parse_page_fragment("#page=1", 3), Some(0));
+        assert_eq!(parse_page_fragment("#page=3", 3), Some(2));
+        assert_eq!(parse_page_fragment("#page=0", 3), None);
+        assert_eq!(parse_page_fragment("#page=4", 3), None);
+        assert_eq!(parse_page_fragment("#page=abc", 3), None);
+        assert_eq!(parse_page_fragment("https://example.com/#page=2", 3), None);
+    }
+
+    #[test]
+    fn accepts_only_the_latest_generation() {
+        assert!(is_current_request(7, 7));
+        assert!(!is_current_request(8, 7));
+        assert!(!is_current_request(7, 8));
+    }
+
+    #[test]
+    fn navigation_state_reports_loading_and_failure() {
+        let loading = NavigationState::Loading { request_id: 12 };
+        assert!(loading.is_loading());
+        assert!(loading.matches_request(12));
+        assert!(!loading.matches_request(11));
+        assert_eq!(loading.error_message(), None);
+
+        let ready = NavigationState::Ready;
+        assert!(!ready.is_loading());
+        assert_eq!(ready.error_message(), None);
+
+        let failed = NavigationState::Failed {
+            message: "Typst compilation failed".to_string(),
+        };
+        assert!(!failed.is_loading());
+        assert_eq!(failed.error_message(), Some("Typst compilation failed"));
     }
 }
 
