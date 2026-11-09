@@ -338,6 +338,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_local_files_over_the_configured_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "lumra-size-limit-test-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"1234").unwrap();
+
+        let result = read_bytes_file_limited(&path, 3);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_url_resolution() {
         let fetcher = ContentFetcher::new();
 
