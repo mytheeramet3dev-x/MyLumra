@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use url::Url;
@@ -167,15 +168,20 @@ impl ContentFetcher {
             return Err(anyhow!("Document exceeds the {} byte limit", MAX_DOCUMENT_BYTES));
         }
 
-        let body = response
-            .bytes()
+        let mut response = response;
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
-        if body.len() as u64 > MAX_DOCUMENT_BYTES {
-            return Err(anyhow!("Document exceeds the {} byte limit", MAX_DOCUMENT_BYTES));
+            .map_err(|e| anyhow!("Failed to read response body: {}", e))?
+        {
+            if body.len() as u64 + chunk.len() as u64 > MAX_DOCUMENT_BYTES {
+                return Err(anyhow!("Document exceeds the {} byte limit", MAX_DOCUMENT_BYTES));
+            }
+            body.extend_from_slice(&chunk);
         }
 
-        String::from_utf8(body.to_vec())
+        String::from_utf8(body)
             .map_err(|e| anyhow!("Document is not valid UTF-8: {}", e))
     }
 
@@ -251,13 +257,16 @@ impl ContentFetcher {
             return Err(anyhow!("Asset exceeds the {} byte limit", MAX_ASSET_BYTES));
         }
 
-        let raw = response
-            .bytes()
+        let mut raw = Vec::new();
+        response
+            .take(MAX_ASSET_BYTES + 1)
+            .read_to_end(&mut raw)
             .map_err(|e| anyhow!("Failed to download {}: {}", resolved_url, e))?;
         if raw.len() as u64 > MAX_ASSET_BYTES {
             return Err(anyhow!("Asset exceeds the {} byte limit", MAX_ASSET_BYTES));
         }
 
+        let raw = Bytes::from(raw);
         self.cache_asset(&normalized, raw.clone());
         Ok(raw)
     }
@@ -302,6 +311,14 @@ impl ContentFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_only_http_schemes_for_network_requests() {
+        assert!(validate_http_url("https://example.com/document.typ").is_ok());
+        assert!(validate_http_url("http://example.com/document.typ").is_ok());
+        assert!(validate_http_url("file:///tmp/document.typ").is_err());
+        assert!(validate_http_url("javascript:alert(1)").is_err());
+    }
 
     #[test]
     fn test_url_resolution() {
