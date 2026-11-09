@@ -27,9 +27,15 @@ pub enum NavigationState {
 }
 
 impl NavigationState {
-    fn is_loading(&self) -> bool { matches!(self, Self::Loading { .. }) }
+    fn is_loading(&self) -> bool {
+        matches!(self, Self::Loading { .. })
+    }
+
     fn error_message(&self) -> Option<&str> {
-        match self { Self::Failed { message } => Some(message), _ => None }
+        match self {
+            Self::Failed { message } => Some(message),
+            _ => None,
+        }
     }
 }
 
@@ -142,6 +148,7 @@ impl LumraApp {
         let initial_url = "lumra://home";
         let mut initial_tab = TabState::new(0, initial_url);
         initial_tab.request_generation = 1;
+        initial_tab.navigation_state = NavigationState::Loading { request_id: 1 };
 
         let default_bookmarks = vec![
             Bookmark {
@@ -242,7 +249,9 @@ impl LumraApp {
 
                 // A new action compilation supersedes any older compilation for this tab.
                 tab.request_generation = tab.request_generation.wrapping_add(1);
-                tab.navigation_state = NavigationState::Loading { request_id: tab.request_generation };
+                tab.navigation_state = NavigationState::Loading {
+                request_id: tab.request_generation,
+            };
                 let request_id = tab.request_generation;
 
                 // Fast in-memory re-compilation with updated state
@@ -312,7 +321,9 @@ impl LumraApp {
                 tab.view_source = false;
                 tab.state.clear();
                 tab.request_generation = tab.request_generation.wrapping_add(1);
-                tab.navigation_state = NavigationState::Loading { request_id: tab.request_generation };
+                tab.navigation_state = NavigationState::Loading {
+                    request_id: tab.request_generation,
+                };
                 let tab_id = tab.id;
                 let request_id = tab.request_generation;
                 self.trigger_navigation(tab_id, request_id, prev_url, HashMap::new());
@@ -340,7 +351,6 @@ impl LumraApp {
     fn reload(&mut self) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             let current = tab.current_url.clone();
-            tab.navigation_state.is_loading() = true;
             tab.request_generation = tab.request_generation.wrapping_add(1);
             tab.navigation_state = NavigationState::Loading { request_id: tab.request_generation };
             let tab_id = tab.id;
@@ -356,6 +366,7 @@ impl LumraApp {
 
         let mut new_tab = TabState::new(new_id, url);
         new_tab.request_generation = 1;
+        new_tab.navigation_state = NavigationState::Loading { request_id: 1 };
         self.tabs.push(new_tab);
         self.active_tab = self.tabs.len() - 1;
         self.trigger_navigation(new_id, 1, url.to_string(), HashMap::new());
