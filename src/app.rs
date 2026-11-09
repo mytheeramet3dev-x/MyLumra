@@ -621,13 +621,30 @@ fn is_current_request(current_generation: u64, result_generation: u64) -> bool {
 
 #[cfg(test)]
 mod navigation_tests {
-    use super::is_current_request;
+    use super::{is_current_request, NavigationState};
 
     #[test]
     fn accepts_only_the_latest_generation() {
         assert!(is_current_request(7, 7));
         assert!(!is_current_request(8, 7));
         assert!(!is_current_request(7, 8));
+    }
+
+    #[test]
+    fn navigation_state_reports_loading_and_failure() {
+        let loading = NavigationState::Loading { request_id: 12 };
+        assert!(loading.is_loading());
+        assert_eq!(loading.error_message(), None);
+
+        let ready = NavigationState::Ready;
+        assert!(!ready.is_loading());
+        assert_eq!(ready.error_message(), None);
+
+        let failed = NavigationState::Failed {
+            message: "Typst compilation failed".to_string(),
+        };
+        assert!(!failed.is_loading());
+        assert_eq!(failed.error_message(), Some("Typst compilation failed"));
     }
 }
 
