@@ -20,6 +20,7 @@ pub struct SelectionState {
 pub struct ViewportOutcome {
     pub clicked_link: Option<String>,
     pub hovered_link: Option<String>,
+    pub scrolled_to_page: Option<usize>,
 }
 
 pub fn render_viewport(
@@ -34,10 +35,12 @@ pub fn render_viewport(
     raw_source: &str,
     find_state: &mut FindState,
     selection_state: &mut SelectionState,
+    scroll_to_page: Option<usize>,
 ) -> ViewportOutcome {
     let mut outcome = ViewportOutcome {
         clicked_link: None,
         hovered_link: None,
+        scrolled_to_page: None,
     };
 
     // 1. View Source Mode
@@ -123,6 +126,11 @@ pub fn render_viewport(
                             );
 
                             let (rect, response) = ui.allocate_exact_size(display_size, egui::Sense::click_and_drag());
+
+                            if scroll_to_page == Some(idx) {
+                                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                                outcome.scrolled_to_page = Some(idx);
+                            }
 
                             if !web_mode {
                                 // Draw paper shadow in doc mode
