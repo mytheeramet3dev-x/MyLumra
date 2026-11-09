@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use eframe::egui::{self, Color32, RichText};
-use crate::engine::{compile_and_render, FontStore, LumraAction, PageRender};
+use crate::engine::{compile_and_render, DocumentModel, FontStore, LumraAction, PageRender};
 use crate::net::ContentFetcher;
 use crate::ui::{
     render_bookmarks_bar, render_navbar, render_tabs, render_viewport, Bookmark, FindState,
@@ -52,6 +52,8 @@ pub struct TabState {
     pub history: Vec<String>,
     pub history_index: usize,
     pub pages: Vec<PageRender>,
+    /// Structured metadata and indexes for the currently committed Typst document.
+    pub document: Option<DocumentModel>,
     pub textures: Vec<egui::TextureHandle>,
     pub navigation_state: NavigationState,
     pub zoom: f32,
@@ -78,6 +80,7 @@ impl TabState {
             history: vec![initial_url.to_string()],
             history_index: 0,
             pages: Vec::new(),
+            document: None,
             textures: Vec::new(),
             navigation_state: NavigationState::Loading { request_id: 0 },
             zoom: 1.0,
@@ -431,6 +434,11 @@ impl eframe::App for LumraApp {
                 tab.raw_source = nav.raw_source;
                 match nav.result {
                     Ok(pages) => {
+                        tab.document = Some(DocumentModel::from_rendered(
+                            &nav.url,
+                            &tab.raw_source,
+                            &pages,
+                        ));
                         tab.textures.clear();
                         for (idx, page) in pages.iter().enumerate() {
                             let tex = ctx.load_texture(
