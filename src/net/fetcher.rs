@@ -56,6 +56,7 @@ impl ContentFetcher {
         let blocking_client = reqwest::blocking::Client::builder()
             .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
             .timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
             .build()
             .unwrap_or_default();
 
@@ -90,7 +91,11 @@ impl ContentFetcher {
                     return joined.to_string();
                 }
             } else if base_norm.starts_with("lumra://") {
-                return format!("{}/{}", base_norm.trim_end_matches('/'), normalized.trim_start_matches('/'));
+                return format!(
+                "{}/{}",
+                base_norm.trim_end_matches('/'),
+                normalized.trim_start_matches('/')
+            );
             } else {
                 // Base is a local file path
                 let base_path = Path::new(&base_norm);
@@ -164,8 +169,14 @@ impl ContentFetcher {
             return Err(anyhow!("HTTP Status: {}", response.status()));
         }
 
-        if response.content_length().is_some_and(|len| len > MAX_DOCUMENT_BYTES) {
-            return Err(anyhow!("Document exceeds the {} byte limit", MAX_DOCUMENT_BYTES));
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_DOCUMENT_BYTES)
+        {
+            return Err(anyhow!(
+                "Document exceeds the {} byte limit",
+                MAX_DOCUMENT_BYTES
+            ));
         }
 
         let mut response = response;
@@ -176,7 +187,10 @@ impl ContentFetcher {
             .map_err(|e| anyhow!("Failed to read response body: {}", e))?
         {
             if body.len() as u64 + chunk.len() as u64 > MAX_DOCUMENT_BYTES {
-                return Err(anyhow!("Document exceeds the {} byte limit", MAX_DOCUMENT_BYTES));
+                return Err(anyhow!(
+                    "Document exceeds the {} byte limit",
+                    MAX_DOCUMENT_BYTES
+                ));
             }
             body.extend_from_slice(&chunk);
         }
@@ -253,7 +267,10 @@ impl ContentFetcher {
             return Err(anyhow!("HTTP Status {} for {}", response.status(), resolved_url));
         }
 
-        if response.content_length().is_some_and(|len| len > MAX_ASSET_BYTES) {
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_ASSET_BYTES)
+        {
             return Err(anyhow!("Asset exceeds the {} byte limit", MAX_ASSET_BYTES));
         }
 
