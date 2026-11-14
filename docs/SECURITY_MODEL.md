@@ -20,7 +20,7 @@ Both declared HTTP content length and the actual downloaded body size are checke
 
 The current fetcher is not yet a safe sandbox for untrusted documents. In particular:
 
-1. **Private-network destinations still need blocking.** Loopback, link-local, private, multicast, and cloud metadata destinations must be denied for untrusted remote documents. DNS resolution and rebinding need explicit treatment. Redirects are currently disabled rather than followed, which prevents an untrusted redirect from bypassing a future destination policy.
+1. **Network address classification needs an independent security review.** Remote HTTP(S) requests resolve hostnames before connecting, reject common private, loopback, link-local, multicast, carrier-grade NAT, benchmarking, and internal-host destinations, and pin the client to the validated address set to reduce DNS-rebinding risk. Redirects are disabled. The special-use address list should still be audited against current IANA registries and tested on every supported platform.
 2. **Timeouts and concurrency need budgets.** Per-request timeouts alone do not bound aggregate concurrent work.
 3. **Import recursion and compilation work need limits.** The compiler pipeline needs limits for dependency depth/count, total fetched bytes, compile duration, and memory.
 4. **Cache policy needs stronger semantics.** The current insertion-order eviction is bounded FIFO, not LRU; cache keys and invalidation should be reviewed before persistent caching is introduced.
