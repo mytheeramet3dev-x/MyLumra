@@ -1,14 +1,52 @@
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+/// Hard upper bound for one downloaded resource (including uncached resources).
+const MAX_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
+/// Total memory budget for cached assets.
+const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
 use url::Url;
+
+struct AssetCache {
+    entries: HashMap<String, Bytes>,
+    insertion_order: VecDeque<String>,
+    total_bytes: usize,
+}
+
+impl AssetCache {
+    fn new() -> Self {
+        Self { entries: HashMap::new(), insertion_order: VecDeque::new(), total_bytes: 0 }
+    }
+
+    fn get(&self, key: &str) -> Option<Bytes> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: String, bytes: Bytes) {
+        if bytes.len() > MAX_CACHE_BYTES { return; }
+        if let Some(previous) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous.len());
+            self.insertion_order.retain(|entry| entry != &key);
+        }
+        while self.total_bytes.saturating_add(bytes.len()) > MAX_CACHE_BYTES {
+            let Some(oldest) = self.insertion_order.pop_front() else { break; };
+            if let Some(previous) = self.entries.remove(&oldest) {
+                self.total_bytes = self.total_bytes.saturating_sub(previous.len());
+            }
+        }
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len());
+        self.insertion_order.push_back(key.clone());
+        self.entries.insert(key, bytes);
+    }
+}
 
 pub struct ContentFetcher {
     async_client: reqwest::Client,
     blocking_client: reqwest::blocking::Client,
-    asset_cache: Mutex<HashMap<String, Bytes>>,
+    asset_cache: Mutex<AssetCache>,
 }
 
 impl ContentFetcher {
@@ -28,7 +66,7 @@ impl ContentFetcher {
         Self {
             async_client,
             blocking_client,
-            asset_cache: Mutex::new(HashMap::new()),
+            asset_cache: Mutex::new(AssetCache::new()),
         }
     }
 
@@ -129,12 +167,18 @@ impl ContentFetcher {
             return Err(anyhow!("HTTP Status: {}", response.status()));
         }
 
-        let text = response
-            .text()
+        if response.content_length().is_some_and(|len| len > MAX_RESOURCE_BYTES as u64) {
+            return Err(anyhow!("Resource exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+        }
+        let body = response
+            .bytes()
             .await
-            .map_err(|e| anyhow!("Failed to decode response: {}", e))?;
-
-        Ok(text)
+            .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
+        if body.len() > MAX_RESOURCE_BYTES {
+            return Err(anyhow!("Resource exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+        }
+        String::from_utf8(body.to_vec())
+            .map_err(|e| anyhow!("Response is not valid UTF-8: {}", e))
     }
 
     /// Synchronous fetch for text (used by #import and #include)
@@ -152,7 +196,7 @@ impl ContentFetcher {
         {
             let cache = self.asset_cache.lock().unwrap();
             if let Some(cached) = cache.get(&normalized) {
-                return Ok(cached.clone());
+                return Ok(cached);
             }
         }
 
@@ -169,8 +213,16 @@ impl ContentFetcher {
 
         // 3. Handle file:// scheme
         if let Some(path) = trimmed.strip_prefix("file://") {
+            let metadata = std::fs::metadata(path)
+                .map_err(|e| anyhow!("Failed to inspect local asset {}: {}", path, e))?;
+            if metadata.len() > MAX_RESOURCE_BYTES as u64 {
+                return Err(anyhow!("Local asset exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            }
             let data = std::fs::read(path)
                 .map_err(|e| anyhow!("Failed to read local asset {}: {}", path, e))?;
+            if data.len() > MAX_RESOURCE_BYTES {
+                return Err(anyhow!("Local asset exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            }
             let bytes = Bytes::from(data);
             self.cache_asset(&normalized, bytes.clone());
             return Ok(bytes);
@@ -204,11 +256,17 @@ impl ContentFetcher {
             return Err(anyhow!("HTTP Status {} for {}", response.status(), resolved_url));
         }
 
+        if response.content_length().is_some_and(|len| len > MAX_RESOURCE_BYTES as u64) {
+            return Err(anyhow!("Resource exceeds the {} MiB limit: {}", MAX_RESOURCE_BYTES / (1024 * 1024), resolved_url));
+        }
         let raw = response
             .bytes()
             .map_err(|e| anyhow!("Failed to download {}: {}", resolved_url, e))?;
+        if raw.len() > MAX_RESOURCE_BYTES {
+            return Err(anyhow!("Resource exceeds the {} MiB limit: {}", MAX_RESOURCE_BYTES / (1024 * 1024), resolved_url));
+        }
 
-        self.cache_asset(url_str, raw.clone());
+        self.cache_asset(&normalized, raw.clone());
         Ok(raw)
     }
 
