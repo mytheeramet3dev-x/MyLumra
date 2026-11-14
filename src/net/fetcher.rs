@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -9,6 +10,19 @@ use std::sync::Mutex;
 const MAX_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
 /// Total memory budget for cached assets.
 const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
+ 
+fn read_file_limited(path: &Path, description: &str) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| anyhow!("Failed to open {} {}: {}", description, path.display(), e))?;
+    let mut limited = file.take(MAX_RESOURCE_BYTES as u64 + 1);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes)
+        .map_err(|e| anyhow!("Failed to read {} {}: {}", description, path.display(), e))?;
+    if bytes.len() > MAX_RESOURCE_BYTES {
+        return Err(anyhow!("{} exceeds the {} MiB limit", description, MAX_RESOURCE_BYTES / (1024 * 1024)));
+    }
+    Ok(bytes)
+}
 
 fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
@@ -232,32 +246,14 @@ impl ContentFetcher {
         // 2. Local file:// scheme
         if let Some(path) = trimmed.strip_prefix("file://") {
             let path_buf = PathBuf::from(path);
-            let metadata = std::fs::metadata(&path_buf)
-                .map_err(|e| anyhow!("Failed to inspect file {}: {}", path, e))?;
-            if metadata.len() > MAX_RESOURCE_BYTES as u64 {
-                return Err(anyhow!("Local document exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
-            }
-            let bytes = std::fs::read(&path_buf)
-                .map_err(|e| anyhow!("Failed to read file {}: {}", path, e))?;
-            if bytes.len() > MAX_RESOURCE_BYTES {
-                return Err(anyhow!("Local document exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
-            }
+            let bytes = read_file_limited(&path_buf, "local document")?;
             return String::from_utf8(bytes)
                 .map_err(|e| anyhow!("Local document is not valid UTF-8: {}", e));
         }
 
         // Check if direct local path
         if Path::new(trimmed).is_file() {
-            let metadata = std::fs::metadata(trimmed)
-                .map_err(|e| anyhow!("Failed to inspect file {}: {}", trimmed, e))?;
-            if metadata.len() > MAX_RESOURCE_BYTES as u64 {
-                return Err(anyhow!("Local document exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
-            }
-            let bytes = std::fs::read(trimmed)
-                .map_err(|e| anyhow!("Failed to read file {}: {}", trimmed, e))?;
-            if bytes.len() > MAX_RESOURCE_BYTES {
-                return Err(anyhow!("Local document exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
-            }
+            let bytes = read_file_limited(Path::new(trimmed), "local document")?;
             return String::from_utf8(bytes)
                 .map_err(|e| anyhow!("Local document is not valid UTF-8: {}", e));
         }
@@ -289,12 +285,17 @@ impl ContentFetcher {
         if response.content_length().is_some_and(|len| len > MAX_RESOURCE_BYTES as u64) {
             return Err(anyhow!("Resource exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
         }
-        let body = response
-            .bytes()
+        let mut response = response;
+        let mut body = bytes::BytesMut::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
-        if body.len() > MAX_RESOURCE_BYTES {
-            return Err(anyhow!("Resource exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            .map_err(|e| anyhow!("Failed to read response body: {}", e))?
+        {
+            if body.len().saturating_add(chunk.len()) > MAX_RESOURCE_BYTES {
+                return Err(anyhow!("Resource exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            }
+            body.extend_from_slice(&chunk);
         }
         String::from_utf8(body.to_vec())
             .map_err(|e| anyhow!("Response is not valid UTF-8: {}", e))
@@ -361,16 +362,7 @@ impl ContentFetcher {
 
         // 3. Handle local resources within the explicitly opened document directory.
         if let Some(path) = local_path {
-            let metadata = std::fs::metadata(&path)
-                .map_err(|e| anyhow!("Failed to inspect local asset {}: {}", path.display(), e))?;
-            if metadata.len() > MAX_RESOURCE_BYTES as u64 {
-                return Err(anyhow!("Local asset exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
-            }
-            let data = std::fs::read(&path)
-                .map_err(|e| anyhow!("Failed to read local asset {}: {}", path.display(), e))?;
-            if data.len() > MAX_RESOURCE_BYTES {
-                return Err(anyhow!("Local asset exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
-            }
+            let data = read_file_limited(&path, "local asset")?;
             let bytes = Bytes::from(data);
             self.cache_asset(&normalized, bytes.clone());
             return Ok(bytes);
@@ -402,12 +394,15 @@ impl ContentFetcher {
         if response.content_length().is_some_and(|len| len > MAX_RESOURCE_BYTES as u64) {
             return Err(anyhow!("Resource exceeds the {} MiB limit: {}", MAX_RESOURCE_BYTES / (1024 * 1024), resolved_url));
         }
-        let raw = response
-            .bytes()
+        let mut limited = response.take(MAX_RESOURCE_BYTES as u64 + 1);
+        let mut data = Vec::new();
+        limited
+            .read_to_end(&mut data)
             .map_err(|e| anyhow!("Failed to download {}: {}", resolved_url, e))?;
-        if raw.len() > MAX_RESOURCE_BYTES {
+        if data.len() > MAX_RESOURCE_BYTES {
             return Err(anyhow!("Resource exceeds the {} MiB limit: {}", MAX_RESOURCE_BYTES / (1024 * 1024), resolved_url));
         }
+        let raw = Bytes::from(data);
 
         self.cache_asset(&normalized, raw.clone());
         Ok(raw)
