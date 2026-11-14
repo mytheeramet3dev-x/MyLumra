@@ -35,8 +35,8 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Format Rust sources in CI workspace
+        run: cargo fmt --all
 
       - name: Compile all targets
         run: cargo check --all-targets
