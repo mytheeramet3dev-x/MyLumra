@@ -8,8 +8,8 @@ use crate::net::ContentFetcher;
 
 const MAX_DOCUMENT_PAGES: usize = 128;
 const MAX_RENDER_SCALE: f32 = 4.0;
-const MAX_ESTIMATED_PAGE_PIXELS: u64 = 16 * 1024 * 1024;
-const MAX_ESTIMATED_DOCUMENT_PIXELS: u64 = 64 * 1024 * 1024;
+const MAX_ESTIMATED_PAGE_PIXELS: u64 = 24 * 1024 * 1024;
+const MAX_ESTIMATED_DOCUMENT_PIXELS: u64 = 128 * 1024 * 1024;
 
 /// Conservatively estimate output memory before asking the renderer to allocate pixmaps.
 /// The factor of two covers point-to-pixel conversion and renderer rounding.
