@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+
+const MAX_CONCURRENT_COMPILES: usize = 2;
 use eframe::egui::{self, Color32, RichText};
 use crate::engine::{compile_and_render, FontStore, LumraAction, PageRender};
 use crate::net::ContentFetcher;
@@ -13,6 +15,7 @@ pub struct NavigationResult {
     pub tab_id: usize,
     pub url: String,
     pub raw_source: String,
+    pub generation: u64,
     pub result: anyhow::Result<Vec<PageRender>>,
 }
 
@@ -26,6 +29,7 @@ pub struct TabState {
     pub pages: Vec<PageRender>,
     pub textures: Vec<egui::TextureHandle>,
     pub is_loading: bool,
+    pub navigation_generation: u64,
     pub error_message: Option<String>,
     pub zoom: f32,
     pub web_mode: bool,
@@ -52,6 +56,7 @@ impl TabState {
             pages: Vec::new(),
             textures: Vec::new(),
             is_loading: true,
+            navigation_generation: 0,
             error_message: None,
             zoom: 1.0,
             web_mode: true,
@@ -72,6 +77,7 @@ pub struct LumraApp {
     active_tab: usize,
     font_store: Arc<FontStore>,
     fetcher: Arc<ContentFetcher>,
+    compile_slots: Arc<tokio::sync::Semaphore>,
     tx: Sender<NavigationResult>,
     rx: Receiver<NavigationResult>,
     hovered_url: Option<String>,
@@ -156,6 +162,7 @@ impl LumraApp {
             active_tab: 0,
             font_store,
             fetcher,
+            compile_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_COMPILES)),
             tx,
             rx,
             hovered_url: None,
@@ -164,17 +171,34 @@ impl LumraApp {
             bookmarks: default_bookmarks,
         };
 
-        app.trigger_navigation(0, initial_url.to_string(), HashMap::new());
+        app.trigger_navigation(0, 0, initial_url.to_string(), HashMap::new());
         app
     }
 
-    fn trigger_navigation(&self, tab_id: usize, url: String, state: HashMap<String, String>) {
+    fn trigger_navigation(&self, tab_id: usize, generation: u64, url: String, state: HashMap<String, String>) {
         let font_store = self.font_store.clone();
         let fetcher = self.fetcher.clone();
         let tx = self.tx.clone();
         let [vp_w, vp_h] = self.last_viewport_size;
+        let compile_permit = match self.compile_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let _ = self.tx.send(NavigationResult {
+                    tab_id,
+                    generation,
+                    url,
+                    raw_source: String::new(),
+                    result: Err(anyhow::anyhow!(
+                        "Lumra is already compiling {} documents; please retry shortly",
+                        MAX_CONCURRENT_COMPILES
+                    )),
+                });
+                return;
+            }
+        };
 
         std::thread::spawn(move || {
+            let _compile_permit = compile_permit;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
@@ -202,6 +226,7 @@ impl LumraApp {
 
             let _ = tx.send(NavigationResult {
                 tab_id,
+                generation,
                 url,
                 raw_source,
                 result: compile_res,
@@ -217,14 +242,33 @@ impl LumraApp {
                 // Fast in-memory re-compilation with updated state
                 let source = tab.raw_source.clone();
                 let url = tab.current_url.clone();
+                tab.navigation_generation = tab.navigation_generation.wrapping_add(1);
+                let generation = tab.navigation_generation;
                 let tab_id = tab.id;
                 let state = tab.state.clone();
                 let font_store = self.font_store.clone();
                 let fetcher = self.fetcher.clone();
                 let [vp_w, vp_h] = self.last_viewport_size;
                 let tx = self.tx.clone();
+                let compile_permit = match self.compile_slots.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let _ = tx.send(NavigationResult {
+                            tab_id,
+                            generation,
+                            url,
+                            raw_source: source,
+                            result: Err(anyhow::anyhow!(
+                                "Lumra is already compiling {} documents; please retry shortly",
+                                MAX_CONCURRENT_COMPILES
+                            )),
+                        });
+                        return;
+                    }
+                };
 
                 std::thread::spawn(move || {
+                    let _compile_permit = compile_permit;
                     let compile_res = compile_and_render(
                         font_store,
                         fetcher,
@@ -237,6 +281,7 @@ impl LumraApp {
                     );
                     let _ = tx.send(NavigationResult {
                         tab_id,
+                        generation,
                         url,
                         raw_source: source,
                         result: compile_res,
@@ -263,9 +308,11 @@ impl LumraApp {
                 tab.history_index = tab.history.len() - 1;
             }
 
+            tab.navigation_generation = tab.navigation_generation.wrapping_add(1);
+            let generation = tab.navigation_generation;
             let tab_id = tab.id;
             let tab_state = tab.state.clone();
-            self.trigger_navigation(tab_id, url, tab_state);
+            self.trigger_navigation(tab_id, generation, url, tab_state);
         }
     }
 
@@ -278,8 +325,10 @@ impl LumraApp {
                 tab.url_input = prev_url.clone();
                 tab.view_source = false;
                 tab.state.clear();
+                tab.navigation_generation = tab.navigation_generation.wrapping_add(1);
+                let generation = tab.navigation_generation;
                 let tab_id = tab.id;
-                self.trigger_navigation(tab_id, prev_url, HashMap::new());
+                self.trigger_navigation(tab_id, generation, prev_url, HashMap::new());
             }
         }
     }
@@ -293,8 +342,10 @@ impl LumraApp {
                 tab.url_input = next_url.clone();
                 tab.view_source = false;
                 tab.state.clear();
+                tab.navigation_generation = tab.navigation_generation.wrapping_add(1);
+                let generation = tab.navigation_generation;
                 let tab_id = tab.id;
-                self.trigger_navigation(tab_id, next_url, HashMap::new());
+                self.trigger_navigation(tab_id, generation, next_url, HashMap::new());
             }
         }
     }
@@ -303,9 +354,11 @@ impl LumraApp {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             let current = tab.current_url.clone();
             tab.is_loading = true;
+            tab.navigation_generation = tab.navigation_generation.wrapping_add(1);
+            let generation = tab.navigation_generation;
             let tab_id = tab.id;
             let tab_state = tab.state.clone();
-            self.trigger_navigation(tab_id, current, tab_state);
+            self.trigger_navigation(tab_id, generation, current, tab_state);
         }
     }
 
@@ -316,7 +369,7 @@ impl LumraApp {
         let new_tab = TabState::new(new_id, url);
         self.tabs.push(new_tab);
         self.active_tab = self.tabs.len() - 1;
-        self.trigger_navigation(new_id, url.to_string(), HashMap::new());
+        self.trigger_navigation(new_id, 0, url.to_string(), HashMap::new());
     }
 
     fn close_tab(&mut self, idx: usize) {
@@ -365,6 +418,9 @@ impl eframe::App for LumraApp {
         // 1. Process async navigation results
         while let Ok(nav) = self.rx.try_recv() {
             if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == nav.tab_id) {
+                if tab.navigation_generation != nav.generation {
+                    continue;
+                }
                 tab.is_loading = false;
                 tab.raw_source = nav.raw_source;
                 match nav.result {

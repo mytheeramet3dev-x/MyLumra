@@ -1,34 +1,197 @@
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::io::Read;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use url::Url;
+
+/// Hard upper bound for one downloaded resource (including uncached resources).
+const MAX_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
+/// Total memory budget for cached assets.
+const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
+/// Upper bound across page and asset network requests for one browser instance.
+const MAX_CONCURRENT_REMOTE_REQUESTS: usize = 8;
+ 
+fn file_url_to_path(raw: &str) -> Result<PathBuf> {
+    let url = Url::parse(raw)
+        .map_err(|e| anyhow!("Invalid file URL {}: {}", raw, e))?;
+    if url.scheme() != "file" {
+        return Err(anyhow!("Expected a file URL, got {}", url.scheme()));
+    }
+    url.to_file_path()
+        .map_err(|_| anyhow!("Unsupported or invalid local file URL: {}", raw))
+}
+
+fn read_file_limited(path: &Path, description: &str) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| anyhow!("Failed to open {} {}: {}", description, path.display(), e))?;
+    let mut limited = file.take(MAX_RESOURCE_BYTES as u64 + 1);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes)
+        .map_err(|e| anyhow!("Failed to read {} {}: {}", description, path.display(), e))?;
+    if bytes.len() > MAX_RESOURCE_BYTES {
+        return Err(anyhow!("{} exceeds the {} MiB limit", description, MAX_RESOURCE_BYTES / (1024 * 1024)));
+    }
+    Ok(bytes)
+}
+
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || octets[0] == 0
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
+                || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || octets[0] >= 240
+        }
+        IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4() {
+                return is_blocked_ip(IpAddr::V4(mapped));
+            }
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_multicast()
+                || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8)
+                || (ip.segments()[0] == 0x0100 && ip.segments()[1] == 0)
+                || (ip.segments()[0] == 0x0064 && ip.segments()[1] == 0xff9b)
+                || ip.segments()[0] == 0x2002
+                || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0)
+        }
+    }
+}
+
+fn validate_network_target(url: &Url, addresses: &[SocketAddr]) -> Result<()> {
+    let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+    let host_lower = host.trim_end_matches('.').to_ascii_lowercase();
+    if host_lower == "localhost"
+        || host_lower.ends_with(".localhost")
+        || host_lower.ends_with(".local")
+        || host_lower.ends_with(".internal")
+    {
+        return Err(anyhow!("Local and internal hostnames are blocked: {}", host));
+    }
+    if addresses.is_empty() {
+        return Err(anyhow!("No network addresses resolved for {}", host));
+    }
+    if let Some(address) = addresses.iter().find(|address| is_blocked_ip(address.ip())) {
+        return Err(anyhow!("Private or non-public network destination is blocked: {}", address.ip()));
+    }
+    Ok(())
+}
+
+async fn build_pinned_async_client(url: &Url) -> Result<reqwest::Client> {
+    let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+    let port = url.port_or_known_default().ok_or_else(|| anyhow!("URL has no known port"))?;
+    let literal_ip = match url.host() {
+        Some(Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
+        Some(Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
+        _ => None,
+    };
+    let addresses: Vec<SocketAddr> = if let Some(ip) = literal_ip {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|e| anyhow!("DNS lookup failed for {}: {}", host, e))?
+            .collect()
+    };
+    validate_network_target(url, &addresses)?;
+    let mut builder = reqwest::Client::builder()
+        .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if literal_ip.is_none() {
+        builder = builder.resolve_to_addrs(host, &addresses);
+    }
+    builder.build().map_err(|e| anyhow!("Failed to build safe HTTP client: {}", e))
+}
+
+fn build_pinned_blocking_client(url: &Url) -> Result<reqwest::blocking::Client> {
+    let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+    let port = url.port_or_known_default().ok_or_else(|| anyhow!("URL has no known port"))?;
+    let literal_ip = match url.host() {
+        Some(Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
+        Some(Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
+        _ => None,
+    };
+    let addresses: Vec<SocketAddr> = if let Some(ip) = literal_ip {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        (host, port)
+            .to_socket_addrs()
+            .map_err(|e| anyhow!("DNS lookup failed for {}: {}", host, e))?
+            .collect()
+    };
+    validate_network_target(url, &addresses)?;
+    let mut builder = reqwest::blocking::Client::builder()
+        .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if literal_ip.is_none() {
+        builder = builder.resolve_to_addrs(host, &addresses);
+    }
+    builder.build().map_err(|e| anyhow!("Failed to build safe HTTP client: {}", e))
+}
+use url::{Host, Url};
+
+struct AssetCache {
+    entries: HashMap<String, Bytes>,
+    insertion_order: VecDeque<String>,
+    total_bytes: usize,
+}
+
+impl AssetCache {
+    fn new() -> Self {
+        Self { entries: HashMap::new(), insertion_order: VecDeque::new(), total_bytes: 0 }
+    }
+
+    fn get(&self, key: &str) -> Option<Bytes> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: String, bytes: Bytes) {
+        if bytes.len() > MAX_CACHE_BYTES { return; }
+        if let Some(previous) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous.len());
+            self.insertion_order.retain(|entry| entry != &key);
+        }
+        while self.total_bytes.saturating_add(bytes.len()) > MAX_CACHE_BYTES {
+            let Some(oldest) = self.insertion_order.pop_front() else { break; };
+            if let Some(previous) = self.entries.remove(&oldest) {
+                self.total_bytes = self.total_bytes.saturating_sub(previous.len());
+            }
+        }
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len());
+        self.insertion_order.push_back(key.clone());
+        self.entries.insert(key, bytes);
+    }
+}
 
 pub struct ContentFetcher {
-    async_client: reqwest::Client,
-    blocking_client: reqwest::blocking::Client,
-    asset_cache: Mutex<HashMap<String, Bytes>>,
+    asset_cache: Mutex<AssetCache>,
+    remote_requests: tokio::sync::Semaphore,
 }
 
 impl ContentFetcher {
     pub fn new() -> Self {
-        let async_client = reqwest::Client::builder()
-            .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_default();
-
-        let blocking_client = reqwest::blocking::Client::builder()
-            .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_default();
-
         Self {
-            async_client,
-            blocking_client,
-            asset_cache: Mutex::new(HashMap::new()),
+            asset_cache: Mutex::new(AssetCache::new()),
+            remote_requests: tokio::sync::Semaphore::new(MAX_CONCURRENT_REMOTE_REQUESTS),
         }
     }
 
@@ -98,16 +261,18 @@ impl ContentFetcher {
         }
 
         // 2. Local file:// scheme
-        if let Some(path) = trimmed.strip_prefix("file://") {
-            let path_buf = PathBuf::from(path);
-            return std::fs::read_to_string(&path_buf)
-                .map_err(|e| anyhow!("Failed to read file {}: {}", path, e));
+        if trimmed.starts_with("file://") {
+            let path_buf = file_url_to_path(trimmed)?;
+            let bytes = read_file_limited(&path_buf, "local document")?;
+            return String::from_utf8(bytes)
+                .map_err(|e| anyhow!("Local document is not valid UTF-8: {}", e));
         }
 
         // Check if direct local path
         if Path::new(trimmed).is_file() {
-            return std::fs::read_to_string(trimmed)
-                .map_err(|e| anyhow!("Failed to read file {}: {}", trimmed, e));
+            let bytes = read_file_limited(Path::new(trimmed), "local document")?;
+            return String::from_utf8(bytes)
+                .map_err(|e| anyhow!("Local document is not valid UTF-8: {}", e));
         }
 
         // 3. Remote HTTP/HTTPS fetch
@@ -117,8 +282,17 @@ impl ContentFetcher {
             trimmed.to_string()
         };
 
-        let response = self
-            .async_client
+        // Fail fast before DNS resolution: do not build an unbounded waiter queue.
+        let _request_permit = self.remote_requests
+            .try_acquire()
+            .map_err(|_| anyhow!("Too many concurrent remote resource requests (limit: {})", MAX_CONCURRENT_REMOTE_REQUESTS))?;
+        let parsed_url = Url::parse(&resolved_url)
+            .map_err(|e| anyhow!("Invalid URL {}: {}", resolved_url, e))?;
+        if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
+            return Err(anyhow!("Unsupported network scheme: {}", parsed_url.scheme()));
+        }
+        let client = build_pinned_async_client(&parsed_url).await?;
+        let response = client
             .get(&resolved_url)
             .header("Accept", "text/typst, text/plain;q=0.9, */*;q=0.8")
             .send()
@@ -129,34 +303,74 @@ impl ContentFetcher {
             return Err(anyhow!("HTTP Status: {}", response.status()));
         }
 
-        let text = response
-            .text()
+        if response.content_length().is_some_and(|len| len > MAX_RESOURCE_BYTES as u64) {
+            return Err(anyhow!("Resource exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+        }
+        let mut response = response;
+        let mut body = bytes::BytesMut::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| anyhow!("Failed to decode response: {}", e))?;
-
-        Ok(text)
+            .map_err(|e| anyhow!("Failed to read response body: {}", e))?
+        {
+            if body.len().saturating_add(chunk.len()) > MAX_RESOURCE_BYTES {
+                return Err(anyhow!("Resource exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        String::from_utf8(body.to_vec())
+            .map_err(|e| anyhow!("Response is not valid UTF-8: {}", e))
     }
 
     /// Synchronous fetch for text (used by #import and #include)
-    pub fn fetch_text_blocking(&self, url_str: &str) -> Result<String> {
-        let bytes = self.fetch_bytes_blocking(url_str)?;
+    pub fn fetch_text_blocking(&self, url_str: &str, local_root: Option<&Path>) -> Result<String> {
+        let bytes = self.fetch_bytes_blocking(url_str, local_root)?;
         String::from_utf8(bytes.to_vec())
             .map_err(|e| anyhow!("UTF-8 decode error for {}: {}", url_str, e))
     }
 
     /// Synchronous fetch for raw bytes (used by #image, #read, etc.)
-    pub fn fetch_bytes_blocking(&self, url_str: &str) -> Result<Bytes> {
+    pub fn fetch_bytes_blocking(&self, url_str: &str, local_root: Option<&Path>) -> Result<Bytes> {
         let normalized = Self::normalize_url(url_str);
+        let trimmed = normalized.trim();
+
+        // Resolve local paths before cache lookup so a cached entry cannot bypass
+        // the current document's filesystem capability boundary.
+        let local_path = if trimmed.starts_with("file://") {
+            Some(file_url_to_path(trimmed)?)
+        } else if !trimmed.contains("://")
+            && !trimmed.starts_with("http://")
+            && !trimmed.starts_with("https://")
+            && !trimmed.starts_with("lumra://")
+        {
+            Some(PathBuf::from(trimmed))
+        } else {
+            None
+        };
+
+        let local_path = if let Some(path) = local_path {
+            let root = local_root.ok_or_else(|| {
+                anyhow!("Local resource access is denied for remote documents: {}", trimmed)
+            })?;
+            let canonical_root = root.canonicalize()
+                .map_err(|e| anyhow!("Failed to resolve local document root: {}", e))?;
+            let canonical_path = path.canonicalize()
+                .map_err(|e| anyhow!("Failed to resolve local resource {}: {}", trimmed, e))?;
+            if !canonical_path.starts_with(&canonical_root) {
+                return Err(anyhow!("Local resource is outside the opened document directory: {}", trimmed));
+            }
+            Some(canonical_path)
+        } else {
+            None
+        };
 
         // 1. Check in-memory asset cache
         {
             let cache = self.asset_cache.lock().unwrap();
             if let Some(cached) = cache.get(&normalized) {
-                return Ok(cached.clone());
+                return Ok(cached);
             }
         }
-
-        let trimmed = normalized.trim();
 
         // 2. Handle internal lumra:// assets
         if let Some(path) = trimmed.strip_prefix("lumra://") {
@@ -167,34 +381,33 @@ impl ContentFetcher {
             return Err(anyhow!("Unknown lumra asset: {}", trimmed));
         }
 
-        // 3. Handle file:// scheme
-        if let Some(path) = trimmed.strip_prefix("file://") {
-            let data = std::fs::read(path)
-                .map_err(|e| anyhow!("Failed to read local asset {}: {}", path, e))?;
+        // 3. Handle local resources within the explicitly opened document directory.
+        if let Some(path) = local_path {
+            let data = read_file_limited(&path, "local asset")?;
             let bytes = Bytes::from(data);
             self.cache_asset(&normalized, bytes.clone());
             return Ok(bytes);
         }
 
-        // 4. Handle direct local filesystem path
-        let local_path = Path::new(trimmed);
-        if local_path.is_file() {
-            let data = std::fs::read(local_path)
-                .map_err(|e| anyhow!("Failed to read local file {}: {}", trimmed, e))?;
-            let bytes = Bytes::from(data);
-            self.cache_asset(url_str, bytes.clone());
-            return Ok(bytes);
-        }
-
-        // 5. Remote HTTP/HTTPS fetch
+        // 4. Remote HTTP/HTTPS fetch
         let resolved_url = if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
             format!("https://{}", trimmed)
         } else {
             trimmed.to_string()
         };
 
-        let response = self
-            .blocking_client
+        // Blocking compiler asset fetches fail fast rather than creating an
+        // unbounded queue of worker threads waiting for network access.
+        let _request_permit = self.remote_requests
+            .try_acquire()
+            .map_err(|_| anyhow!("Too many concurrent remote resource requests (limit: {})", MAX_CONCURRENT_REMOTE_REQUESTS))?;
+        let parsed_url = Url::parse(&resolved_url)
+            .map_err(|e| anyhow!("Invalid URL {}: {}", resolved_url, e))?;
+        if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
+            return Err(anyhow!("Unsupported network scheme: {}", parsed_url.scheme()));
+        }
+        let client = build_pinned_blocking_client(&parsed_url)?;
+        let response = client
             .get(&resolved_url)
             .header("Accept", "image/*, application/octet-stream, text/*, */*")
             .send()
@@ -204,11 +417,20 @@ impl ContentFetcher {
             return Err(anyhow!("HTTP Status {} for {}", response.status(), resolved_url));
         }
 
-        let raw = response
-            .bytes()
+        if response.content_length().is_some_and(|len| len > MAX_RESOURCE_BYTES as u64) {
+            return Err(anyhow!("Resource exceeds the {} MiB limit: {}", MAX_RESOURCE_BYTES / (1024 * 1024), resolved_url));
+        }
+        let mut limited = response.take(MAX_RESOURCE_BYTES as u64 + 1);
+        let mut data = Vec::new();
+        limited
+            .read_to_end(&mut data)
             .map_err(|e| anyhow!("Failed to download {}: {}", resolved_url, e))?;
+        if data.len() > MAX_RESOURCE_BYTES {
+            return Err(anyhow!("Resource exceeds the {} MiB limit: {}", MAX_RESOURCE_BYTES / (1024 * 1024), resolved_url));
+        }
+        let raw = Bytes::from(data);
 
-        self.cache_asset(url_str, raw.clone());
+        self.cache_asset(&normalized, raw.clone());
         Ok(raw)
     }
 
@@ -239,6 +461,147 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blocking_remote_fetch_respects_global_concurrency_budget() {
+        let fetcher = ContentFetcher::new();
+        let _all_permits = fetcher
+            .remote_requests
+            .try_acquire_many(MAX_CONCURRENT_REMOTE_REQUESTS as u32)
+            .unwrap();
+
+        let result = fetcher.fetch_bytes_blocking("https://example.com/asset.bin", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Too many concurrent"));
+    }
+
+    #[test]
+    fn async_page_fetch_respects_global_concurrency_budget() {
+        let fetcher = ContentFetcher::new();
+        let _all_permits = fetcher
+            .remote_requests
+            .try_acquire_many(MAX_CONCURRENT_REMOTE_REQUESTS as u32)
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let result = runtime.block_on(fetcher.fetch("https://example.com/"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Too many concurrent"));
+    }
+
+    #[test]
+    fn private_and_special_use_addresses_are_blocked() {
+        let blocked = [
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "198.18.0.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "64:ff9b::808:808",
+            "2002:0808:0808::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+        ];
+        for value in blocked {
+            let ip = value.parse::<IpAddr>().unwrap();
+            assert!(is_blocked_ip(ip), "expected {} to be blocked", value);
+        }
+        assert!(!is_blocked_ip("1.1.1.1".parse().unwrap()));
+        assert!(!is_blocked_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn internal_hostnames_are_blocked() {
+        let url = Url::parse("https://metadata.google.internal/").unwrap();
+        let result = validate_network_target(
+            &url,
+            &["142.250.72.14:443".parse::<SocketAddr>().unwrap()],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remote_document_cannot_read_local_file_urls() {
+        let fetcher = ContentFetcher::new();
+        let result = fetcher.fetch_bytes_blocking("file:///etc/passwd", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("denied"));
+    }
+
+    #[test]
+    fn local_document_cannot_escape_its_directory() {
+        let fetcher = ContentFetcher::new();
+        let unique = format!(
+            "lumra-security-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(&unique).join("site");
+        let outside = std::env::temp_dir().join(&unique).join("secret.txt");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, b"secret").unwrap();
+
+        let outside_url = format!("file://{}", outside.display());
+        let result = fetcher.fetch_bytes_blocking(&outside_url, Some(&root));
+
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(&unique));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("outside"));
+    }
+
+    #[test]
+    fn local_document_can_read_resources_inside_its_directory() {
+        let fetcher = ContentFetcher::new();
+        let unique = format!(
+            "lumra-security-allowed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).unwrap();
+        let asset = root.join("asset.bin");
+        std::fs::write(&asset, b"allowed").unwrap();
+
+        let asset_url = format!("file://{}", asset.display());
+        let result = fetcher.fetch_bytes_blocking(&asset_url, Some(&root));
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result.unwrap().as_ref(), b"allowed");
+    }
+
+    #[test]
+    fn file_urls_decode_percent_encoded_paths() {
+        let fetcher = ContentFetcher::new();
+        let unique = format!(
+            "lumra-file-url-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).unwrap();
+        let asset = root.join("file with spaces.txt");
+        std::fs::write(&asset, b"decoded").unwrap();
+        let file_url = Url::from_file_path(&asset).unwrap().to_string();
+
+        let result = fetcher.fetch_bytes_blocking(&file_url, Some(&root));
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result.unwrap().as_ref(), b"decoded");
+    }
+
+    #[test]
     fn test_url_resolution() {
         let fetcher = ContentFetcher::new();
 
@@ -261,6 +624,35 @@ mod tests {
         // 5. File URL resolution
         let resolved = fetcher.resolve_url(Some("file:///Users/test/index.typ"), "components.typ");
         assert_eq!(resolved, "file:///Users/test/components.typ");
+    }
+
+    #[test]
+    fn asset_cache_evicts_oldest_entries_to_respect_budget() {
+        let mut cache = AssetCache::new();
+        let first = Bytes::from(vec![1u8; MAX_CACHE_BYTES / 2]);
+        let second = Bytes::from(vec![2u8; MAX_CACHE_BYTES / 2]);
+        let third = Bytes::from(vec![3u8; MAX_CACHE_BYTES / 2]);
+
+        cache.insert("first".to_string(), first);
+        cache.insert("second".to_string(), second);
+        cache.insert("third".to_string(), third);
+
+        assert!(cache.get("first").is_none());
+        assert!(cache.get("second").is_some());
+        assert!(cache.get("third").is_some());
+        assert!(cache.total_bytes <= MAX_CACHE_BYTES);
+    }
+
+    #[test]
+    fn asset_cache_does_not_store_entries_larger_than_budget() {
+        let mut cache = AssetCache::new();
+        cache.insert(
+            "oversized".to_string(),
+            Bytes::from(vec![0u8; MAX_CACHE_BYTES + 1]),
+        );
+
+        assert!(cache.get("oversized").is_none());
+        assert_eq!(cache.total_bytes, 0);
     }
 }
 
