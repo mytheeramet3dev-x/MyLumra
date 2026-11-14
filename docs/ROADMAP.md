@@ -18,7 +18,9 @@
 - [x] Add GitHub Actions CI for cargo fmt, cargo check, and cargo test.
 - [x] Resolve and pin remote DNS results; block private and common special-use network ranges.
 - [ ] Independently audit the IP classification policy against IANA special-purpose registries.
-- [ ] Add bounded concurrency, dependency-count, and compile-time budgets.
+- [x] Bound concurrent remote page and asset requests with a shared eight-request limit and fail-fast admission.
+- [ ] Add per-origin fairness, cancellation, and retry scheduling.
+- [ ] Add dependency-count and compile-time/memory budgets.
 - [ ] Confirm CI passes on the Phase 0 branch.
 
 ## Phase 1 — Lumra Core
