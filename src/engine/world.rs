@@ -62,6 +62,7 @@ pub struct LumraWorld {
     fonts: Arc<FontStore>,
     fetcher: Arc<ContentFetcher>,
     base_url: Option<String>,
+    allow_local_resources: bool,
     main_id: FileId,
     source: Source,
     file_cache: Mutex<HashMap<FileId, Bytes>>,
@@ -78,6 +79,9 @@ impl LumraWorld {
         viewport_height: f32,
         custom_inputs: &HashMap<String, String>,
     ) -> Self {
+        let allow_local_resources = base_url.as_deref().is_some_and(|url| {
+            url.starts_with("file://") || (!url.contains("://") && std::path::Path::new(url).is_file())
+        });
         let main_id = FileId::new_fake(VirtualPath::new("index.typ"));
         let source = Source::new(main_id, content);
 
@@ -109,6 +113,7 @@ impl LumraWorld {
             fonts,
             fetcher,
             base_url,
+            allow_local_resources,
             main_id,
             source,
             file_cache: Mutex::new(HashMap::new()),
@@ -153,7 +158,7 @@ impl World for LumraWorld {
         let path_str = id.vpath().as_rootless_path().to_string_lossy();
         let resolved_url = self.fetcher.resolve_url(self.base_url.as_deref(), &path_str);
 
-        match self.fetcher.fetch_text_blocking(&resolved_url) {
+        match self.fetcher.fetch_text_blocking(&resolved_url, self.allow_local_resources) {
             Ok(text) => {
                 let src = Source::new(id, text);
                 self.source_cache.lock().unwrap().insert(id, src.clone());
@@ -183,7 +188,7 @@ impl World for LumraWorld {
         let path_str = id.vpath().as_rootless_path().to_string_lossy();
         let resolved_url = self.fetcher.resolve_url(self.base_url.as_deref(), &path_str);
 
-        match self.fetcher.fetch_bytes_blocking(&resolved_url) {
+        match self.fetcher.fetch_bytes_blocking(&resolved_url, self.allow_local_resources) {
             Ok(raw) => {
                 let bytes = Bytes::new(raw.to_vec());
                 self.file_cache.lock().unwrap().insert(id, bytes.clone());
