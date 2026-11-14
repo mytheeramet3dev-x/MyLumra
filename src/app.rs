@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+
+const MAX_CONCURRENT_COMPILES: usize = 2;
 use eframe::egui::{self, Color32, RichText};
 use crate::engine::{compile_and_render, FontStore, LumraAction, PageRender};
 use crate::net::ContentFetcher;
@@ -75,6 +77,7 @@ pub struct LumraApp {
     active_tab: usize,
     font_store: Arc<FontStore>,
     fetcher: Arc<ContentFetcher>,
+    compile_slots: Arc<tokio::sync::Semaphore>,
     tx: Sender<NavigationResult>,
     rx: Receiver<NavigationResult>,
     hovered_url: Option<String>,
@@ -159,6 +162,7 @@ impl LumraApp {
             active_tab: 0,
             font_store,
             fetcher,
+            compile_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_COMPILES)),
             tx,
             rx,
             hovered_url: None,
@@ -176,8 +180,25 @@ impl LumraApp {
         let fetcher = self.fetcher.clone();
         let tx = self.tx.clone();
         let [vp_w, vp_h] = self.last_viewport_size;
+        let compile_permit = match self.compile_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let _ = self.tx.send(NavigationResult {
+                    tab_id,
+                    generation,
+                    url,
+                    raw_source: String::new(),
+                    result: Err(anyhow::anyhow!(
+                        "Lumra is already compiling {} documents; please retry shortly",
+                        MAX_CONCURRENT_COMPILES
+                    )),
+                });
+                return;
+            }
+        };
 
         std::thread::spawn(move || {
+            let _compile_permit = compile_permit;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
@@ -229,8 +250,25 @@ impl LumraApp {
                 let fetcher = self.fetcher.clone();
                 let [vp_w, vp_h] = self.last_viewport_size;
                 let tx = self.tx.clone();
+                let compile_permit = match self.compile_slots.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let _ = tx.send(NavigationResult {
+                            tab_id,
+                            generation,
+                            url,
+                            raw_source: source,
+                            result: Err(anyhow::anyhow!(
+                                "Lumra is already compiling {} documents; please retry shortly",
+                                MAX_CONCURRENT_COMPILES
+                            )),
+                        });
+                        return;
+                    }
+                };
 
                 std::thread::spawn(move || {
+                    let _compile_permit = compile_permit;
                     let compile_res = compile_and_render(
                         font_store,
                         fetcher,
