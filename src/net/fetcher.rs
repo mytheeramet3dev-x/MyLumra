@@ -54,6 +54,7 @@ impl ContentFetcher {
         let async_client = reqwest::Client::builder()
             .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
             .timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
 
@@ -202,15 +203,26 @@ impl ContentFetcher {
     }
 
     /// Synchronous fetch for text (used by #import and #include)
-    pub fn fetch_text_blocking(&self, url_str: &str) -> Result<String> {
-        let bytes = self.fetch_bytes_blocking(url_str)?;
+    pub fn fetch_text_blocking(&self, url_str: &str, allow_local: bool) -> Result<String> {
+        let bytes = self.fetch_bytes_blocking(url_str, allow_local)?;
         String::from_utf8(bytes.to_vec())
             .map_err(|e| anyhow!("UTF-8 decode error for {}: {}", url_str, e))
     }
 
     /// Synchronous fetch for raw bytes (used by #image, #read, etc.)
-    pub fn fetch_bytes_blocking(&self, url_str: &str) -> Result<Bytes> {
+    pub fn fetch_bytes_blocking(&self, url_str: &str, allow_local: bool) -> Result<Bytes> {
         let normalized = Self::normalize_url(url_str);
+        let trimmed = normalized.trim();
+
+        // A remote document must not inherit the browser process's filesystem access.
+        let is_file_url = trimmed.starts_with("file://");
+        let is_plain_local_path = !trimmed.contains("://")
+            && !trimmed.starts_with("http://")
+            && !trimmed.starts_with("https://")
+            && !trimmed.starts_with("lumra://");
+        if !allow_local && (is_file_url || is_plain_local_path) {
+            return Err(anyhow!("Local resource access is denied for remote documents: {}", trimmed));
+        }
 
         // 1. Check in-memory asset cache
         {
@@ -219,8 +231,6 @@ impl ContentFetcher {
                 return Ok(cached);
             }
         }
-
-        let trimmed = normalized.trim();
 
         // 2. Handle internal lumra:// assets
         if let Some(path) = trimmed.strip_prefix("lumra://") {
@@ -251,10 +261,18 @@ impl ContentFetcher {
         // 4. Handle direct local filesystem path
         let local_path = Path::new(trimmed);
         if local_path.is_file() {
+            let metadata = std::fs::metadata(local_path)
+                .map_err(|e| anyhow!("Failed to inspect local file {}: {}", trimmed, e))?;
+            if metadata.len() > MAX_RESOURCE_BYTES as u64 {
+                return Err(anyhow!("Local asset exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            }
             let data = std::fs::read(local_path)
                 .map_err(|e| anyhow!("Failed to read local file {}: {}", trimmed, e))?;
+            if data.len() > MAX_RESOURCE_BYTES {
+                return Err(anyhow!("Local asset exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            }
             let bytes = Bytes::from(data);
-            self.cache_asset(url_str, bytes.clone());
+            self.cache_asset(&normalized, bytes.clone());
             return Ok(bytes);
         }
 
