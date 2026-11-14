@@ -12,6 +12,29 @@ use typst::{Library, World};
 
 use crate::net::ContentFetcher;
 
+/// Per-document dependency budget. The main document is not counted here.
+const MAX_IMPORTED_RESOURCES: usize = 256;
+const MAX_TOTAL_IMPORTED_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct ResourceBudget {
+    count: usize,
+    bytes: usize,
+}
+
+impl ResourceBudget {
+    fn try_reserve(&mut self, bytes: usize) -> bool {
+        if self.count >= MAX_IMPORTED_RESOURCES
+            || self.bytes.saturating_add(bytes) > MAX_TOTAL_IMPORTED_BYTES
+        {
+            return false;
+        }
+        self.count += 1;
+        self.bytes += bytes;
+        true
+    }
+}
+
 /// Holds pre-loaded font metadata and font buffers
 pub struct FontStore {
     pub book: LazyHash<FontBook>,
@@ -69,6 +92,7 @@ pub struct LumraWorld {
     source: Source,
     file_cache: Mutex<HashMap<FileId, Bytes>>,
     source_cache: Mutex<HashMap<FileId, Source>>,
+    resource_budget: Mutex<ResourceBudget>,
 }
 
 impl LumraWorld {
@@ -129,6 +153,7 @@ impl LumraWorld {
             source,
             file_cache: Mutex::new(HashMap::new()),
             source_cache: Mutex::new(HashMap::new()),
+            resource_budget: Mutex::new(ResourceBudget::default()),
         }
     }
 
@@ -136,6 +161,27 @@ impl LumraWorld {
     pub fn set_file(&self, path: &str, bytes: Bytes) {
         let id = FileId::new_fake(VirtualPath::new(path));
         self.file_cache.lock().unwrap().insert(id, bytes);
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn resource_budget_enforces_dependency_count_and_total_bytes() {
+        let mut budget = ResourceBudget::default();
+        for _ in 0..MAX_IMPORTED_RESOURCES {
+            assert!(budget.try_reserve(1));
+        }
+        assert!(!budget.try_reserve(1));
+    }
+
+    #[test]
+    fn resource_budget_enforces_total_imported_bytes() {
+        let mut budget = ResourceBudget::default();
+        assert!(budget.try_reserve(MAX_TOTAL_IMPORTED_BYTES - 1));
+        assert!(!budget.try_reserve(2));
     }
 }
 
@@ -171,6 +217,11 @@ impl World for LumraWorld {
 
         match self.fetcher.fetch_text_blocking(&resolved_url, self.local_root.as_deref()) {
             Ok(text) => {
+                let allowed = self.resource_budget.lock().unwrap().try_reserve(text.len());
+                if !allowed {
+                    tracing::warn!("Document dependency budget exceeded while loading source {}", resolved_url);
+                    return Err(FileError::NotFound(std::path::PathBuf::from(path_str.to_string())));
+                }
                 let src = Source::new(id, text);
                 self.source_cache.lock().unwrap().insert(id, src.clone());
                 Ok(src)
@@ -201,6 +252,11 @@ impl World for LumraWorld {
 
         match self.fetcher.fetch_bytes_blocking(&resolved_url, self.local_root.as_deref()) {
             Ok(raw) => {
+                let allowed = self.resource_budget.lock().unwrap().try_reserve(raw.len());
+                if !allowed {
+                    tracing::warn!("Document dependency budget exceeded while loading asset {}", resolved_url);
+                    return Err(FileError::NotFound(std::path::PathBuf::from(path_str.to_string())));
+                }
                 let bytes = Bytes::new(raw.to_vec());
                 self.file_cache.lock().unwrap().insert(id, bytes.clone());
                 Ok(bytes)
