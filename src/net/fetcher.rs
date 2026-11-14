@@ -272,11 +272,10 @@ impl ContentFetcher {
             trimmed.to_string()
         };
 
-        // Acquire before DNS resolution so lookups are included in the global budget.
+        // Fail fast before DNS resolution: do not build an unbounded waiter queue.
         let _request_permit = self.remote_requests
-            .acquire()
-            .await
-            .map_err(|_| anyhow!("Remote request manager is shutting down"))?;
+            .try_acquire()
+            .map_err(|_| anyhow!("Too many concurrent remote resource requests (limit: {})", MAX_CONCURRENT_REMOTE_REQUESTS))?;
         let parsed_url = Url::parse(&resolved_url)
             .map_err(|e| anyhow!("Invalid URL {}: {}", resolved_url, e))?;
         if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
