@@ -23,6 +23,11 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
                 || octets[0] == 0
                 || (octets[0] == 100 && (64..=127).contains(&octets[1]))
                 || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && (octets[2] == 0 || octets[2] == 2))
+                || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || octets[0] >= 240
         }
         IpAddr::V6(ip) => {
             if let Some(mapped) = ip.to_ipv4() {
@@ -33,13 +38,15 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
                 || ip.is_unique_local()
                 || ip.is_unicast_link_local()
                 || ip.is_multicast()
+                || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8)
+                || (ip.segments()[0] == 0x0100 && ip.segments()[1] == 0)
         }
     }
 }
 
 fn validate_network_target(url: &Url, addresses: &[SocketAddr]) -> Result<()> {
     let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
-    let host_lower = host.to_ascii_lowercase();
+    let host_lower = host.trim_end_matches('.').to_ascii_lowercase();
     if host_lower == "localhost"
         || host_lower.ends_with(".localhost")
         || host_lower.ends_with(".local")
@@ -59,7 +66,12 @@ fn validate_network_target(url: &Url, addresses: &[SocketAddr]) -> Result<()> {
 async fn build_pinned_async_client(url: &Url) -> Result<reqwest::Client> {
     let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
     let port = url.port_or_known_default().ok_or_else(|| anyhow!("URL has no known port"))?;
-    let addresses: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+    let literal_ip = match url.host() {
+        Some(Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
+        Some(Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
+        _ => None,
+    };
+    let addresses: Vec<SocketAddr> = if let Some(ip) = literal_ip {
         vec![SocketAddr::new(ip, port)]
     } else {
         tokio::net::lookup_host((host, port))
@@ -73,7 +85,7 @@ async fn build_pinned_async_client(url: &Url) -> Result<reqwest::Client> {
         .timeout(std::time::Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
-    if host.parse::<IpAddr>().is_err() {
+    if literal_ip.is_none() {
         builder = builder.resolve_to_addrs(host, &addresses);
     }
     builder.build().map_err(|e| anyhow!("Failed to build safe HTTP client: {}", e))
@@ -82,7 +94,12 @@ async fn build_pinned_async_client(url: &Url) -> Result<reqwest::Client> {
 fn build_pinned_blocking_client(url: &Url) -> Result<reqwest::blocking::Client> {
     let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
     let port = url.port_or_known_default().ok_or_else(|| anyhow!("URL has no known port"))?;
-    let addresses: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+    let literal_ip = match url.host() {
+        Some(Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
+        Some(Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
+        _ => None,
+    };
+    let addresses: Vec<SocketAddr> = if let Some(ip) = literal_ip {
         vec![SocketAddr::new(ip, port)]
     } else {
         (host, port)
@@ -96,12 +113,12 @@ fn build_pinned_blocking_client(url: &Url) -> Result<reqwest::blocking::Client> 
         .timeout(std::time::Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
-    if host.parse::<IpAddr>().is_err() {
+    if literal_ip.is_none() {
         builder = builder.resolve_to_addrs(host, &addresses);
     }
     builder.build().map_err(|e| anyhow!("Failed to build safe HTTP client: {}", e))
 }
-use url::Url;
+use url::{Host, Url};
 
 struct AssetCache {
     entries: HashMap<String, Bytes>,
