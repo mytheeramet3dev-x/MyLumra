@@ -54,6 +54,9 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
                 || ip.is_multicast()
                 || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8)
                 || (ip.segments()[0] == 0x0100 && ip.segments()[1] == 0)
+                || (ip.segments()[0] == 0x0064 && ip.segments()[1] == 0xff9b)
+                || ip.segments()[0] == 0x2002
+                || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0)
         }
     }
 }
