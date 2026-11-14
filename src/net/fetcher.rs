@@ -423,6 +423,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn private_and_special_use_addresses_are_blocked() {
+        let blocked = [
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "198.18.0.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+        ];
+        for value in blocked {
+            let ip = value.parse::<IpAddr>().unwrap();
+            assert!(is_blocked_ip(ip), "expected {} to be blocked", value);
+        }
+        assert!(!is_blocked_ip("1.1.1.1".parse().unwrap()));
+        assert!(!is_blocked_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn internal_hostnames_are_blocked() {
+        let url = Url::parse("https://metadata.google.internal/").unwrap();
+        let result = validate_network_target(
+            &url,
+            &["142.250.72.14:443".parse::<SocketAddr>().unwrap()],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn remote_document_cannot_read_local_file_urls() {
         let fetcher = ContentFetcher::new();
         let result = fetcher.fetch_bytes_blocking("file:///etc/passwd", None);
