@@ -448,6 +448,9 @@ mod tests {
             "::1",
             "fd00::1",
             "fe80::1",
+            "64:ff9b::808:808",
+            "2002:0808:0808::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
         ];
         for value in blocked {
             let ip = value.parse::<IpAddr>().unwrap();
