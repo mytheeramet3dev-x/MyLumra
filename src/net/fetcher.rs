@@ -10,6 +10,8 @@ use std::sync::Mutex;
 const MAX_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
 /// Total memory budget for cached assets.
 const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
+/// Upper bound across page and asset network requests for one browser instance.
+const MAX_CONCURRENT_REMOTE_REQUESTS: usize = 8;
  
 fn read_file_limited(path: &Path, description: &str) -> Result<Vec<u8>> {
     let file = std::fs::File::open(path)
@@ -172,12 +174,14 @@ impl AssetCache {
 
 pub struct ContentFetcher {
     asset_cache: Mutex<AssetCache>,
+    remote_requests: tokio::sync::Semaphore,
 }
 
 impl ContentFetcher {
     pub fn new() -> Self {
         Self {
             asset_cache: Mutex::new(AssetCache::new()),
+            remote_requests: tokio::sync::Semaphore::new(MAX_CONCURRENT_REMOTE_REQUESTS),
         }
     }
 
@@ -268,6 +272,11 @@ impl ContentFetcher {
             trimmed.to_string()
         };
 
+        // Acquire before DNS resolution so lookups are included in the global budget.
+        let _request_permit = self.remote_requests
+            .acquire()
+            .await
+            .map_err(|_| anyhow!("Remote request manager is shutting down"))?;
         let parsed_url = Url::parse(&resolved_url)
             .map_err(|e| anyhow!("Invalid URL {}: {}", resolved_url, e))?;
         if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
@@ -378,6 +387,11 @@ impl ContentFetcher {
             trimmed.to_string()
         };
 
+        // Blocking compiler asset fetches fail fast rather than creating an
+        // unbounded queue of worker threads waiting for network access.
+        let _request_permit = self.remote_requests
+            .try_acquire()
+            .map_err(|_| anyhow!("Too many concurrent remote resource requests (limit: {})", MAX_CONCURRENT_REMOTE_REQUESTS))?;
         let parsed_url = Url::parse(&resolved_url)
             .map_err(|e| anyhow!("Invalid URL {}: {}", resolved_url, e))?;
         if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
@@ -436,6 +450,19 @@ impl ContentFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocking_remote_fetch_respects_global_concurrency_budget() {
+        let fetcher = ContentFetcher::new();
+        let _all_permits = fetcher
+            .remote_requests
+            .try_acquire_many(MAX_CONCURRENT_REMOTE_REQUESTS as u32)
+            .unwrap();
+
+        let result = fetcher.fetch_bytes_blocking("https://example.com/asset.bin", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Too many concurrent"));
+    }
 
     #[test]
     fn private_and_special_use_addresses_are_blocked() {
