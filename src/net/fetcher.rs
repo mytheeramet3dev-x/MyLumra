@@ -13,6 +13,16 @@ const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
 /// Upper bound across page and asset network requests for one browser instance.
 const MAX_CONCURRENT_REMOTE_REQUESTS: usize = 8;
  
+fn file_url_to_path(raw: &str) -> Result<PathBuf> {
+    let url = Url::parse(raw)
+        .map_err(|e| anyhow!("Invalid file URL {}: {}", raw, e))?;
+    if url.scheme() != "file" {
+        return Err(anyhow!("Expected a file URL, got {}", url.scheme()));
+    }
+    url.to_file_path()
+        .map_err(|_| anyhow!("Unsupported or invalid local file URL: {}", raw))
+}
+
 fn read_file_limited(path: &Path, description: &str) -> Result<Vec<u8>> {
     let file = std::fs::File::open(path)
         .map_err(|e| anyhow!("Failed to open {} {}: {}", description, path.display(), e))?;
@@ -251,8 +261,8 @@ impl ContentFetcher {
         }
 
         // 2. Local file:// scheme
-        if let Some(path) = trimmed.strip_prefix("file://") {
-            let path_buf = PathBuf::from(path);
+        if trimmed.starts_with("file://") {
+            let path_buf = file_url_to_path(trimmed)?;
             let bytes = read_file_limited(&path_buf, "local document")?;
             return String::from_utf8(bytes)
                 .map_err(|e| anyhow!("Local document is not valid UTF-8: {}", e));
@@ -326,8 +336,8 @@ impl ContentFetcher {
 
         // Resolve local paths before cache lookup so a cached entry cannot bypass
         // the current document's filesystem capability boundary.
-        let local_path = if let Some(path) = trimmed.strip_prefix("file://") {
-            Some(PathBuf::from(path))
+        let local_path = if trimmed.starts_with("file://") {
+            Some(file_url_to_path(trimmed)?)
         } else if !trimmed.contains("://")
             && !trimmed.starts_with("http://")
             && !trimmed.starts_with("https://")
@@ -566,6 +576,29 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(result.unwrap().as_ref(), b"allowed");
+    }
+
+    #[test]
+    fn file_urls_decode_percent_encoded_paths() {
+        let fetcher = ContentFetcher::new();
+        let unique = format!(
+            "lumra-file-url-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).unwrap();
+        let asset = root.join("file with spaces.txt");
+        std::fs::write(&asset, b"decoded").unwrap();
+        let file_url = Url::from_file_path(&asset).unwrap().to_string();
+
+        let result = fetcher.fetch_bytes_blocking(&file_url, Some(&root));
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result.unwrap().as_ref(), b"decoded");
     }
 
     #[test]
