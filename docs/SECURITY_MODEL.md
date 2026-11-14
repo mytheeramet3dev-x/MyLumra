@@ -22,7 +22,7 @@ The current fetcher is not yet a safe sandbox for untrusted documents. In partic
 
 1. **Network address classification needs an independent security review.** Remote HTTP(S) requests resolve hostnames before connecting, reject common private, loopback, link-local, multicast, carrier-grade NAT, benchmarking, documentation, IPv6 translation/tunneling, and internal-host destinations, and pin the client to the validated address set to reduce DNS-rebinding risk. Redirects are disabled. The special-use address list should still be audited against current IANA registries and tested on every supported platform.
 2. **Timeouts and concurrency need budgets.** Per-request timeouts alone do not bound aggregate concurrent work.
-3. **Import recursion and compilation work need limits.** The compiler pipeline needs limits for dependency depth/count, total fetched bytes, compile duration, and memory.
+3. **Compiler execution budgets are partial.** Each Typst document is limited to 256 imported resources and 64 MiB of aggregate imported source/asset data. Explicit dependency-depth, compile-duration, and memory limits are not yet enforced.
 4. **Cache policy needs stronger semantics.** The current insertion-order eviction is bounded FIFO, not LRU; cache keys and invalidation should be reviewed before persistent caching is introduced.
 5. **File URL portability needs review.** Local file URLs currently use a simple path conversion; percent-encoding and platform-specific file URL forms need dedicated tests.
 
