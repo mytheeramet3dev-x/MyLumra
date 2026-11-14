@@ -21,7 +21,8 @@
 - [x] Bound concurrent remote page and asset requests with a shared eight-request limit and fail-fast admission.
 - [ ] Add per-origin fairness, cancellation, and retry scheduling.
 - [x] Limit each Typst document to 256 imported resources and 64 MiB of aggregate imported data.
-- [ ] Enforce dependency-depth, compile-duration, and memory budgets.
+- [x] Limit rendering to 128 pages, 4x scale, 16 MP estimated per page, and 64 MP estimated per document.
+- [ ] Enforce dependency-depth, compile-duration, and total compiler memory budgets.
 - [ ] Confirm CI passes on the Phase 0 branch.
 
 ## Phase 1 — Lumra Core
