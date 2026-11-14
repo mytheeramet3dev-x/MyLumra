@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -8,6 +9,98 @@ use std::sync::Mutex;
 const MAX_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
 /// Total memory budget for cached assets.
 const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
+
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || octets[0] == 0
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+        }
+        IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4() {
+                return is_blocked_ip(IpAddr::V4(mapped));
+            }
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_multicast()
+        }
+    }
+}
+
+fn validate_network_target(url: &Url, addresses: &[SocketAddr]) -> Result<()> {
+    let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+    let host_lower = host.to_ascii_lowercase();
+    if host_lower == "localhost"
+        || host_lower.ends_with(".localhost")
+        || host_lower.ends_with(".local")
+        || host_lower.ends_with(".internal")
+    {
+        return Err(anyhow!("Local and internal hostnames are blocked: {}", host));
+    }
+    if addresses.is_empty() {
+        return Err(anyhow!("No network addresses resolved for {}", host));
+    }
+    if let Some(address) = addresses.iter().find(|address| is_blocked_ip(address.ip())) {
+        return Err(anyhow!("Private or non-public network destination is blocked: {}", address.ip()));
+    }
+    Ok(())
+}
+
+async fn build_pinned_async_client(url: &Url) -> Result<reqwest::Client> {
+    let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+    let port = url.port_or_known_default().ok_or_else(|| anyhow!("URL has no known port"))?;
+    let addresses: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|e| anyhow!("DNS lookup failed for {}: {}", host, e))?
+            .collect()
+    };
+    validate_network_target(url, &addresses)?;
+    let mut builder = reqwest::Client::builder()
+        .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if host.parse::<IpAddr>().is_err() {
+        builder = builder.resolve_to_addrs(host, &addresses);
+    }
+    builder.build().map_err(|e| anyhow!("Failed to build safe HTTP client: {}", e))
+}
+
+fn build_pinned_blocking_client(url: &Url) -> Result<reqwest::blocking::Client> {
+    let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+    let port = url.port_or_known_default().ok_or_else(|| anyhow!("URL has no known port"))?;
+    let addresses: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        (host, port)
+            .to_socket_addrs()
+            .map_err(|e| anyhow!("DNS lookup failed for {}: {}", host, e))?
+            .collect()
+    };
+    validate_network_target(url, &addresses)?;
+    let mut builder = reqwest::blocking::Client::builder()
+        .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if host.parse::<IpAddr>().is_err() {
+        builder = builder.resolve_to_addrs(host, &addresses);
+    }
+    builder.build().map_err(|e| anyhow!("Failed to build safe HTTP client: {}", e))
+}
 use url::Url;
 
 struct AssetCache {
@@ -44,29 +137,12 @@ impl AssetCache {
 }
 
 pub struct ContentFetcher {
-    async_client: reqwest::Client,
-    blocking_client: reqwest::blocking::Client,
     asset_cache: Mutex<AssetCache>,
 }
 
 impl ContentFetcher {
     pub fn new() -> Self {
-        let async_client = reqwest::Client::builder()
-            .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
-            .timeout(std::time::Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_default();
-
-        let blocking_client = reqwest::blocking::Client::builder()
-            .user_agent("Lumra/0.2.0 (Typst-Browser; Native-GUI)")
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_default();
-
         Self {
-            async_client,
-            blocking_client,
             asset_cache: Mutex::new(AssetCache::new()),
         }
     }
@@ -176,8 +252,13 @@ impl ContentFetcher {
             trimmed.to_string()
         };
 
-        let response = self
-            .async_client
+        let parsed_url = Url::parse(&resolved_url)
+            .map_err(|e| anyhow!("Invalid URL {}: {}", resolved_url, e))?;
+        if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
+            return Err(anyhow!("Unsupported network scheme: {}", parsed_url.scheme()));
+        }
+        let client = build_pinned_async_client(&parsed_url).await?;
+        let response = client
             .get(&resolved_url)
             .header("Accept", "text/typst, text/plain;q=0.9, */*;q=0.8")
             .send()
@@ -285,8 +366,13 @@ impl ContentFetcher {
             trimmed.to_string()
         };
 
-        let response = self
-            .blocking_client
+        let parsed_url = Url::parse(&resolved_url)
+            .map_err(|e| anyhow!("Invalid URL {}: {}", resolved_url, e))?;
+        if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
+            return Err(anyhow!("Unsupported network scheme: {}", parsed_url.scheme()));
+        }
+        let client = build_pinned_blocking_client(&parsed_url)?;
+        let response = client
             .get(&resolved_url)
             .header("Accept", "image/*, application/octet-stream, text/*, */*")
             .send()
