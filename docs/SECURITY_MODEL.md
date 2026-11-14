@@ -24,7 +24,7 @@ The current fetcher is not yet a safe sandbox for untrusted documents. In partic
 2. **Timeouts and concurrency need budgets.** Per-request timeouts alone do not bound aggregate concurrent work.
 3. **Compiler and renderer execution budgets are partial.** Each browser instance admits at most two background Typst compilation/navigation workers at a time; excess work is rejected immediately rather than queued.  Each Typst document is limited to 256 imported resources and 64 MiB of aggregate imported source/asset data. Rendering is limited to 128 pages, scale up to 4x, 24 megapixel estimated output per page, and 128 megapixels estimated output per document. Explicit dependency-depth, compile-duration, and total compiler memory limits are not yet enforced.
 4. **Cache policy needs stronger semantics.** The current insertion-order eviction is bounded FIFO, not LRU; cache keys and invalidation should be reviewed before persistent caching is introduced.
-5. **File URL portability needs review.** Local file URLs currently use a simple path conversion; percent-encoding and platform-specific file URL forms need dedicated tests.
+5. **File URL portability is partially addressed.** Local `file://` URLs are now parsed with the URL library's platform-aware `to_file_path` conversion, including percent-decoding, and a regression test covers paths containing spaces. Additional platform-specific file URL tests are still required.
 
 ## Required security principle
 
