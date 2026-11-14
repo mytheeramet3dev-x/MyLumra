@@ -138,14 +138,34 @@ impl ContentFetcher {
         // 2. Local file:// scheme
         if let Some(path) = trimmed.strip_prefix("file://") {
             let path_buf = PathBuf::from(path);
-            return std::fs::read_to_string(&path_buf)
-                .map_err(|e| anyhow!("Failed to read file {}: {}", path, e));
+            let metadata = std::fs::metadata(&path_buf)
+                .map_err(|e| anyhow!("Failed to inspect file {}: {}", path, e))?;
+            if metadata.len() > MAX_RESOURCE_BYTES as u64 {
+                return Err(anyhow!("Local document exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            }
+            let bytes = std::fs::read(&path_buf)
+                .map_err(|e| anyhow!("Failed to read file {}: {}", path, e))?;
+            if bytes.len() > MAX_RESOURCE_BYTES {
+                return Err(anyhow!("Local document exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            }
+            return String::from_utf8(bytes)
+                .map_err(|e| anyhow!("Local document is not valid UTF-8: {}", e));
         }
 
         // Check if direct local path
         if Path::new(trimmed).is_file() {
-            return std::fs::read_to_string(trimmed)
-                .map_err(|e| anyhow!("Failed to read file {}: {}", trimmed, e));
+            let metadata = std::fs::metadata(trimmed)
+                .map_err(|e| anyhow!("Failed to inspect file {}: {}", trimmed, e))?;
+            if metadata.len() > MAX_RESOURCE_BYTES as u64 {
+                return Err(anyhow!("Local document exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            }
+            let bytes = std::fs::read(trimmed)
+                .map_err(|e| anyhow!("Failed to read file {}: {}", trimmed, e))?;
+            if bytes.len() > MAX_RESOURCE_BYTES {
+                return Err(anyhow!("Local document exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
+            }
+            return String::from_utf8(bytes)
+                .map_err(|e| anyhow!("Local document is not valid UTF-8: {}", e));
         }
 
         // 3. Remote HTTP/HTTPS fetch
