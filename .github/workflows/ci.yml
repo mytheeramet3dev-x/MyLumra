@@ -38,6 +38,9 @@ jobs:
       - name: Format Rust sources in CI workspace
         run: cargo fmt --all
 
+      - name: Verify rustfmt output
+        run: cargo fmt --all -- --check
+
       - name: Compile all targets
         run: cargo check --all-targets
 
