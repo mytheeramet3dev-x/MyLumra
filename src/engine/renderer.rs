@@ -6,6 +6,43 @@ use typst::model::Destination;
 use super::world::{FontStore, LumraWorld};
 use crate::net::ContentFetcher;
 
+const MAX_DOCUMENT_PAGES: usize = 128;
+const MAX_RENDER_SCALE: f32 = 4.0;
+const MAX_ESTIMATED_PAGE_PIXELS: u64 = 16 * 1024 * 1024;
+const MAX_ESTIMATED_DOCUMENT_PIXELS: u64 = 64 * 1024 * 1024;
+
+/// Conservatively estimate output memory before asking the renderer to allocate pixmaps.
+/// The factor of two covers point-to-pixel conversion and renderer rounding.
+fn validate_render_budget(page_sizes_pt: &[(f64, f64)], scale: f32) -> Result<()> {
+    if page_sizes_pt.len() > MAX_DOCUMENT_PAGES {
+        return Err(anyhow!("Document exceeds the {} page render limit", MAX_DOCUMENT_PAGES));
+    }
+    if !scale.is_finite() || scale <= 0.0 || scale > MAX_RENDER_SCALE {
+        return Err(anyhow!("Render scale must be greater than zero and no more than {}", MAX_RENDER_SCALE));
+    }
+
+    let mut total_pixels = 0_u64;
+    for (width_pt, height_pt) in page_sizes_pt {
+        if !width_pt.is_finite() || !height_pt.is_finite() || *width_pt <= 0.0 || *height_pt <= 0.0 {
+            return Err(anyhow!("Document contains an invalid page size"));
+        }
+        let width_px = (*width_pt * scale as f64 * 2.0).ceil();
+        let height_px = (*height_pt * scale as f64 * 2.0).ceil();
+        if !width_px.is_finite() || !height_px.is_finite() || width_px > u32::MAX as f64 || height_px > u32::MAX as f64 {
+            return Err(anyhow!("Page dimensions exceed the renderer's safe limits"));
+        }
+        let pixels = (width_px as u64).saturating_mul(height_px as u64);
+        if pixels > MAX_ESTIMATED_PAGE_PIXELS {
+            return Err(anyhow!("Page exceeds the {} megapixel render budget", MAX_ESTIMATED_PAGE_PIXELS / 1_000_000));
+        }
+        total_pixels = total_pixels.saturating_add(pixels);
+        if total_pixels > MAX_ESTIMATED_DOCUMENT_PIXELS {
+            return Err(anyhow!("Document exceeds the aggregate render pixel budget"));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct RenderedLink {
     pub rect: egui::Rect,
@@ -66,6 +103,11 @@ pub fn compile_and_render(
             return Err(anyhow!(msg));
         }
     };
+
+    let page_sizes: Vec<(f64, f64)> = document.pages.iter()
+        .map(|page| (page.frame.size().x.to_pt(), page.frame.size().y.to_pt()))
+        .collect();
+    validate_render_budget(&page_sizes, scale)?;
 
     let mut pages = Vec::new();
     for page in &document.pages {
@@ -141,6 +183,19 @@ fn extract_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_budget_rejects_too_many_pages_and_excessive_scale() {
+        let too_many = vec![(800.0, 600.0); MAX_DOCUMENT_PAGES + 1];
+        assert!(validate_render_budget(&too_many, 1.0).is_err());
+        assert!(validate_render_budget(&[(800.0, 600.0)], MAX_RENDER_SCALE + 0.1).is_err());
+    }
+
+    #[test]
+    fn render_budget_rejects_excessive_page_pixels() {
+        assert!(validate_render_budget(&[(20_000.0, 20_000.0)], 2.0).is_err());
+        assert!(validate_render_budget(&[(800.0, 600.0)], 1.0).is_ok());
+    }
 
     #[test]
     fn test_compile_typst_document_with_links_and_assets() {
