@@ -337,6 +337,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remote_document_cannot_read_local_file_urls() {
+        let fetcher = ContentFetcher::new();
+        let result = fetcher.fetch_bytes_blocking("file:///etc/passwd", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("denied"));
+    }
+
+    #[test]
+    fn local_document_cannot_escape_its_directory() {
+        let fetcher = ContentFetcher::new();
+        let unique = format!(
+            "lumra-security-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(&unique).join("site");
+        let outside = std::env::temp_dir().join(&unique).join("secret.txt");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, b"secret").unwrap();
+
+        let outside_url = format!("file://{}", outside.display());
+        let result = fetcher.fetch_bytes_blocking(&outside_url, Some(&root));
+
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(&unique));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("outside"));
+    }
+
+    #[test]
+    fn local_document_can_read_resources_inside_its_directory() {
+        let fetcher = ContentFetcher::new();
+        let unique = format!(
+            "lumra-security-allowed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).unwrap();
+        let asset = root.join("asset.bin");
+        std::fs::write(&asset, b"allowed").unwrap();
+
+        let asset_url = format!("file://{}", asset.display());
+        let result = fetcher.fetch_bytes_blocking(&asset_url, Some(&root));
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result.unwrap().as_ref(), b"allowed");
+    }
+
+    #[test]
     fn test_url_resolution() {
         let fetcher = ContentFetcher::new();
 
