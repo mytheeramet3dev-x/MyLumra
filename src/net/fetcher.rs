@@ -464,6 +464,23 @@ mod tests {
     }
 
     #[test]
+    fn async_page_fetch_respects_global_concurrency_budget() {
+        let fetcher = ContentFetcher::new();
+        let _all_permits = fetcher
+            .remote_requests
+            .try_acquire_many(MAX_CONCURRENT_REMOTE_REQUESTS as u32)
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let result = runtime.block_on(fetcher.fetch("https://example.com/"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Too many concurrent"));
+    }
+
+    #[test]
     fn private_and_special_use_addresses_are_blocked() {
         let blocked = [
             "127.0.0.1",
