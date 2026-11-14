@@ -320,6 +320,35 @@ mod tests {
         let resolved = fetcher.resolve_url(Some("file:///Users/test/index.typ"), "components.typ");
         assert_eq!(resolved, "file:///Users/test/components.typ");
     }
+
+    #[test]
+    fn asset_cache_evicts_oldest_entries_to_respect_budget() {
+        let mut cache = AssetCache::new();
+        let first = Bytes::from(vec![1u8; MAX_CACHE_BYTES / 2]);
+        let second = Bytes::from(vec![2u8; MAX_CACHE_BYTES / 2]);
+        let third = Bytes::from(vec![3u8; MAX_CACHE_BYTES / 2]);
+
+        cache.insert("first".to_string(), first);
+        cache.insert("second".to_string(), second);
+        cache.insert("third".to_string(), third);
+
+        assert!(cache.get("first").is_none());
+        assert!(cache.get("second").is_some());
+        assert!(cache.get("third").is_some());
+        assert!(cache.total_bytes <= MAX_CACHE_BYTES);
+    }
+
+    #[test]
+    fn asset_cache_does_not_store_entries_larger_than_budget() {
+        let mut cache = AssetCache::new();
+        cache.insert(
+            "oversized".to_string(),
+            Bytes::from(vec![0u8; MAX_CACHE_BYTES + 1]),
+        );
+
+        assert!(cache.get("oversized").is_none());
+        assert_eq!(cache.total_bytes, 0);
+    }
 }
 
 pub const LUMRA_LOGO_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
