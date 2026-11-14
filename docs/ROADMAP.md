@@ -19,6 +19,7 @@
 - [x] Resolve and pin remote DNS results; block private and common special-use network ranges.
 - [ ] Independently audit the IP classification policy against IANA special-purpose registries.
 - [x] Bound concurrent remote page and asset requests with a shared eight-request limit and fail-fast admission.
+- [x] Limit background navigation/Typst compilation to two workers per browser instance.
 - [ ] Add per-origin fairness, cancellation, and retry scheduling.
 - [x] Limit each Typst document to 256 imported resources and 64 MiB of aggregate imported data.
 - [x] Limit rendering to 128 pages, 4x scale, 24 MP estimated per page, and 128 MP estimated per document.
