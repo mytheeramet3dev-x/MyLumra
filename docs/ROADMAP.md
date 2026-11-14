@@ -20,7 +20,8 @@
 - [ ] Independently audit the IP classification policy against IANA special-purpose registries.
 - [x] Bound concurrent remote page and asset requests with a shared eight-request limit and fail-fast admission.
 - [ ] Add per-origin fairness, cancellation, and retry scheduling.
-- [ ] Add dependency-count and compile-time/memory budgets.
+- [x] Limit each Typst document to 256 imported resources and 64 MiB of aggregate imported data.
+- [ ] Enforce dependency-depth, compile-duration, and memory budgets.
 - [ ] Confirm CI passes on the Phase 0 branch.
 
 ## Phase 1 — Lumra Core
