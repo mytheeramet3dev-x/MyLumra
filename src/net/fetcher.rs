@@ -203,26 +203,46 @@ impl ContentFetcher {
     }
 
     /// Synchronous fetch for text (used by #import and #include)
-    pub fn fetch_text_blocking(&self, url_str: &str, allow_local: bool) -> Result<String> {
-        let bytes = self.fetch_bytes_blocking(url_str, allow_local)?;
+    pub fn fetch_text_blocking(&self, url_str: &str, local_root: Option<&Path>) -> Result<String> {
+        let bytes = self.fetch_bytes_blocking(url_str, local_root)?;
         String::from_utf8(bytes.to_vec())
             .map_err(|e| anyhow!("UTF-8 decode error for {}: {}", url_str, e))
     }
 
     /// Synchronous fetch for raw bytes (used by #image, #read, etc.)
-    pub fn fetch_bytes_blocking(&self, url_str: &str, allow_local: bool) -> Result<Bytes> {
+    pub fn fetch_bytes_blocking(&self, url_str: &str, local_root: Option<&Path>) -> Result<Bytes> {
         let normalized = Self::normalize_url(url_str);
         let trimmed = normalized.trim();
 
-        // A remote document must not inherit the browser process's filesystem access.
-        let is_file_url = trimmed.starts_with("file://");
-        let is_plain_local_path = !trimmed.contains("://")
+        // Resolve local paths before cache lookup so a cached entry cannot bypass
+        // the current document's filesystem capability boundary.
+        let local_path = if let Some(path) = trimmed.strip_prefix("file://") {
+            Some(PathBuf::from(path))
+        } else if !trimmed.contains("://")
             && !trimmed.starts_with("http://")
             && !trimmed.starts_with("https://")
-            && !trimmed.starts_with("lumra://");
-        if !allow_local && (is_file_url || is_plain_local_path) {
-            return Err(anyhow!("Local resource access is denied for remote documents: {}", trimmed));
-        }
+            && !trimmed.starts_with("lumra://")
+        {
+            Some(PathBuf::from(trimmed))
+        } else {
+            None
+        };
+
+        let local_path = if let Some(path) = local_path {
+            let root = local_root.ok_or_else(|| {
+                anyhow!("Local resource access is denied for remote documents: {}", trimmed)
+            })?;
+            let canonical_root = root.canonicalize()
+                .map_err(|e| anyhow!("Failed to resolve local document root: {}", e))?;
+            let canonical_path = path.canonicalize()
+                .map_err(|e| anyhow!("Failed to resolve local resource {}: {}", trimmed, e))?;
+            if !canonical_path.starts_with(&canonical_root) {
+                return Err(anyhow!("Local resource is outside the opened document directory: {}", trimmed));
+            }
+            Some(canonical_path)
+        } else {
+            None
+        };
 
         // 1. Check in-memory asset cache
         {
@@ -241,15 +261,15 @@ impl ContentFetcher {
             return Err(anyhow!("Unknown lumra asset: {}", trimmed));
         }
 
-        // 3. Handle file:// scheme
-        if let Some(path) = trimmed.strip_prefix("file://") {
-            let metadata = std::fs::metadata(path)
-                .map_err(|e| anyhow!("Failed to inspect local asset {}: {}", path, e))?;
+        // 3. Handle local resources within the explicitly opened document directory.
+        if let Some(path) = local_path {
+            let metadata = std::fs::metadata(&path)
+                .map_err(|e| anyhow!("Failed to inspect local asset {}: {}", path.display(), e))?;
             if metadata.len() > MAX_RESOURCE_BYTES as u64 {
                 return Err(anyhow!("Local asset exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
             }
-            let data = std::fs::read(path)
-                .map_err(|e| anyhow!("Failed to read local asset {}: {}", path, e))?;
+            let data = std::fs::read(&path)
+                .map_err(|e| anyhow!("Failed to read local asset {}: {}", path.display(), e))?;
             if data.len() > MAX_RESOURCE_BYTES {
                 return Err(anyhow!("Local asset exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
             }
@@ -258,25 +278,7 @@ impl ContentFetcher {
             return Ok(bytes);
         }
 
-        // 4. Handle direct local filesystem path
-        let local_path = Path::new(trimmed);
-        if local_path.is_file() {
-            let metadata = std::fs::metadata(local_path)
-                .map_err(|e| anyhow!("Failed to inspect local file {}: {}", trimmed, e))?;
-            if metadata.len() > MAX_RESOURCE_BYTES as u64 {
-                return Err(anyhow!("Local asset exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
-            }
-            let data = std::fs::read(local_path)
-                .map_err(|e| anyhow!("Failed to read local file {}: {}", trimmed, e))?;
-            if data.len() > MAX_RESOURCE_BYTES {
-                return Err(anyhow!("Local asset exceeds the {} MiB limit", MAX_RESOURCE_BYTES / (1024 * 1024)));
-            }
-            let bytes = Bytes::from(data);
-            self.cache_asset(&normalized, bytes.clone());
-            return Ok(bytes);
-        }
-
-        // 5. Remote HTTP/HTTPS fetch
+        // 4. Remote HTTP/HTTPS fetch
         let resolved_url = if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
             format!("https://{}", trimmed)
         } else {
