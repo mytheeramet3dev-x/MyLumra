@@ -12,10 +12,13 @@
 - [x] Add per-resource size limits to remote documents, local documents, and fetched assets.
 - [x] Bound the in-memory asset cache to 128 MiB with FIFO eviction.
 - [x] Add unit tests for cache eviction and oversized cache entries.
-- [ ] Add origin-aware local-file and network resource permissions.
-- [ ] Validate redirect destinations and block private-network access for remote documents.
+- [x] Deny local-file access to remote documents.
+- [x] Restrict local document resources to the canonical directory of the opened document.
+- [x] Disable automatic HTTP redirects pending destination validation.
+- [x] Add GitHub Actions CI for cargo fmt, cargo check, and cargo test.
+- [ ] Block private-network destinations, including DNS rebinding cases.
 - [ ] Add bounded concurrency, dependency-count, and compile-time budgets.
-- [ ] Run cargo fmt, cargo check, and cargo test in CI.
+- [ ] Confirm CI passes on the Phase 0 branch.
 
 ## Phase 1 — Lumra Core
 
